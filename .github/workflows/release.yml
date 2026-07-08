@@ -31,12 +31,15 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      # Lets steps skip cleanly when the backend PAT isn't configured yet (no daily-failure spam).
+      HAS_BACKEND_TOKEN: ${{ secrets.BACKEND_REPO_TOKEN != '' }}
     steps:
       - name: Checkout CLI
         uses: actions/checkout@v4
 
       - name: Checkout backend route registry
-        if: github.event_name != 'push' # tag releases don't re-sync
+        if: github.event_name != 'push' && env.HAS_BACKEND_TOKEN == 'true'
         uses: actions/checkout@v4
         with:
           repository: KStartups/Mailboxy
@@ -56,7 +59,7 @@ jobs:
 
       - name: Sync registry from backend
         id: sync
-        if: github.event_name != 'push'
+        if: github.event_name != 'push' && env.HAS_BACKEND_TOKEN == 'true'
         run: |
           node scripts/sync-registry.mjs backend/src/api/v1/openapi.ts
           if git diff --quiet -- src/vendor/openapi.ts; then
