@@ -168,6 +168,29 @@ falcon campaigns update-status <id> --status paused --quiet   # no output, exit 
 
 ---
 
+## Agent skills
+
+Ready-made workflow skills for Claude / agents live in [`skills/`](./skills). Each one teaches an agent
+to drive `falcon` for a real job — so "launch a campaign" or "triage my replies" becomes a single ask.
+
+| Skill | Use case |
+|---|---|
+| [`falcon-quickstart`](./skills/falcon-quickstart) | Install, authenticate, and the shape of every command |
+| [`campaign-launch`](./skills/campaign-launch) | Create → sequence → assign inboxes → add leads → launch → measure |
+| [`lead-import`](./skills/lead-import) | Single/bulk upsert, CSV into lists, filtered search & export |
+| [`inbox-triage`](./skills/inbox-triage) | Read the reply feed, reply/forward, label, re-enroll repliers |
+| [`deliverability-check`](./skills/deliverability-check) | Health rollups, SPF/DKIM/DMARC/MX, alert rules |
+
+Install into a project with the [skills CLI](https://github.com/anthropics/skills):
+
+```bash
+npx skills add https://github.com/Outfalcon/Outfalcon-CLI
+# or a single skill:
+npx skills add https://github.com/Outfalcon/Outfalcon-CLI/tree/main/skills/campaign-launch
+```
+
+They're plain `SKILL.md` files — usable with Claude Code, or as a reference for any agent.
+
 ## Command reference
 
 Commands are grouped by resource. This is the map; use `--help` on any of them for exact flags.
