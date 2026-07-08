@@ -1,0 +1,75 @@
+name: Sync registry & release
+
+# Pulls the route registry from the backend once a day (or on demand). If it changed, validates the
+# build, bumps the patch version, and publishes to npm — so the CLI's command tree tracks the API
+# automatically. No-ops when nothing changed.
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # push the version-bump commit + tag
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  sync-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout CLI
+        uses: actions/checkout@v4
+
+      - name: Checkout backend route registry
+        uses: actions/checkout@v4
+        with:
+          repository: KStartups/Mailboxy
+          token: ${{ secrets.BACKEND_REPO_TOKEN }}
+          path: backend
+          sparse-checkout: |
+            src/api/v1/openapi.ts
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+
+      - name: Sync registry from backend
+        run: node scripts/sync-registry.mjs backend/src/api/v1/openapi.ts
+
+      - name: Detect change
+        id: diff
+        run: |
+          if git diff --quiet -- src/vendor/openapi.ts; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Registry unchanged — nothing to release."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Registry changed — will validate and release."
+          fi
+
+      - name: Validate (build + test)
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          npm run build
+          npm test
+
+      - name: Commit, version bump & publish
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          git config user.name "outfalcon-bot"
+          git config user.email "bot@outfalcon.dev"
+          git add src/vendor/openapi.ts
+          git commit -m "chore: sync route registry from backend"
+          npm version patch -m "release: v%s"
+          npm publish --access public
+          git push --follow-tags origin HEAD:main
