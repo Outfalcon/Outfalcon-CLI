@@ -1,15 +1,13 @@
 name: Release
 
-# Publishes @outfalcon/falcon via npm Trusted Publishing (OIDC) — no npm token needed.
-# Three ways in:
+# Publishes @outfalcon/falcon. Three ways in:
 #   • daily schedule / manual dispatch → sync the route registry from the backend; if it changed,
 #     bump the patch version and publish. (Dispatch can force-publish the current version.)
 #   • push a tag v*.*.* → publish the current version (manual/code-only releases).
 #
-# Requires:
-#   • npm Trusted Publisher configured for this package → GitHub Actions, repo Outfalcon/Outfalcon-CLI,
-#     workflow file release.yml.
-#   • Secret BACKEND_REPO_TOKEN — a read-only PAT for the private KStartups/Mailboxy repo (registry sync).
+# Requires two repo secrets:
+#   • NPM_TOKEN         — an npm Automation token (bypasses 2FA), for publishing.
+#   • BACKEND_REPO_TOKEN — a read-only PAT for the private KStartups/Mailboxy repo (registry sync).
 
 on:
   schedule:
@@ -25,7 +23,6 @@ on:
 
 permissions:
   contents: write # push the version-bump commit + tag
-  id-token: write # OIDC token for npm trusted publishing
 
 concurrency:
   group: release
@@ -51,12 +48,9 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 20
           cache: npm
           registry-url: https://registry.npmjs.org
-
-      - name: Use OIDC-capable npm
-        run: npm install -g npm@latest # trusted publishing needs npm >= 11.5.1
 
       - run: npm ci
 
@@ -88,9 +82,11 @@ jobs:
           npm version patch -m "release: v%s"
           git push --follow-tags origin HEAD:main
 
-      - name: Publish to npm (OIDC — no token)
+      - name: Publish to npm
         if: >-
           github.event_name == 'push' ||
           steps.sync.outputs.changed == 'true' ||
           inputs.force_publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
