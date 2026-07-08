@@ -6,8 +6,8 @@ import { loginCommand } from "./commands/login";
 import { configCommand } from "./commands/config";
 import { apiCommand } from "./commands/api";
 import { completionCommand } from "./commands/completion";
-
-const VERSION = "0.1.0";
+// Bundled at build time so `falcon --version` always matches the published package version.
+import { version as VERSION } from "../package.json";
 
 const program = new Command();
 
