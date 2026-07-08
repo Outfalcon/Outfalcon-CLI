@@ -78,8 +78,9 @@ export const TAGS: Array<{ name: string; description: string }> = [
     "description": "The outbound queue: which lead sends next, when, and from which inbox — computed live from the engine's schedule state."
   },
   {
-    "name": "Flows",
-    "description": "Subsequences / automation flows: trigger on lead status or label, then run a graph of AI-reply, email, LinkedIn, call-task, wait and condition nodes."
+    "name": "Subsequences",
+    "alias": "flows",
+    "description": "Automation subsequences (a.k.a. flows): trigger on lead status or label, then run a graph of AI-reply, email, LinkedIn, call-task, wait and condition nodes. API paths remain /flows."
   },
   {
     "name": "AI Agents",
@@ -171,7 +172,7 @@ export const TAG_GROUPS: Array<{ name: string; tags: string[] }> = [
       "Campaigns",
       "Campaign Groups",
       "Scheduled Emails",
-      "Flows",
+      "Subsequences",
       "AI Agents"
     ]
   },
@@ -205,17 +206,17 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "method": "get",
     "path": "/workspaces",
     "tag": "Workspaces",
-    "summary": "List workspaces the key owner belongs to",
+    "summary": "List workspaces this key may act on",
     "scope": "team",
-    "description": "Visibility follows the key OWNER's memberships, not the key's workspace — each row includes the owner's membership role there. Workspace ids the owner isn't a member of 404 everywhere in this resource."
+    "description": "Authority comes from the KEY, not its owner's memberships. A workspace-scoped key returns only its own workspace; an instance-scoped key returns every workspace in the instance. Other workspace ids 404 everywhere in this resource for a workspace key."
   },
   {
     "method": "post",
     "path": "/workspaces",
     "tag": "Workspaces",
-    "summary": "Create a workspace (key owner becomes its owner)",
+    "summary": "Create a workspace (instance keys only)",
     "scope": "team",
-    "description": "Requires owner/admin membership in the key's CURRENT workspace (403 otherwise). slug is optional (409 if taken). Typical agency flow: create the client workspace, mint its key with POST /workspaces/{id}/api-keys, then operate it with that key. Returns 201.",
+    "description": "Instance-scoped keys only (403 for a workspace key). The key owner becomes the new workspace's owner. slug is optional (409 if taken). Typical agency flow: create the client workspace, mint its key with POST /workspaces/{id}/api-keys, then operate it with that key. Returns 201.",
     "body": true,
     "reqSchema": "WorkspaceCreateInput",
     "idempotent": true
@@ -240,7 +241,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Workspaces",
     "summary": "Invite an email into the workspace (sends the accept-invite email)",
     "scope": "team",
-    "description": "Requires owner/admin membership in the TARGET workspace. role is the membership level (member|admin); optional role_id pre-assigns a granular RBAC role applied when the invitee joins (404 if unknown). 409 if the email is already a member. Returns 201.",
+    "description": "The {id} must be a workspace this key may act on (its own for a workspace key; any for an instance key) — 404 otherwise. role is the membership level (member|admin); optional role_id pre-assigns a granular RBAC role applied when the invitee joins (404 if unknown). 409 if the email is already a member. Returns 201.",
     "body": true,
     "reqSchema": "WorkspaceInviteInput",
     "idempotent": true
@@ -251,7 +252,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Workspaces",
     "summary": "Mint an API key scoped to this workspace (plaintext returned once)",
     "scope": "team",
-    "description": "Requires owner/admin membership in the target workspace. The response's `key` field is the full plaintext secret and can never be retrieved again — store it now. Empty permissions {} = the key inherits the owner's role. Returns 201.",
+    "description": "The {id} must be a workspace this key may act on (404 otherwise). A workspace key may mint only another workspace key for its own workspace; instance keys may mint either scope (key_scope in the body). The response's `key` field is the full plaintext secret and can never be retrieved again. Empty permissions {} = the key inherits the owner's role. Returns 201.",
     "body": true,
     "reqSchema": "WorkspaceApiKeyInput",
     "idempotent": true
@@ -1810,50 +1811,50 @@ export const ROUTE_REGISTRY: RouteDef[] = [
   {
     "method": "get",
     "path": "/flows/campaigns/{campaignId}",
-    "tag": "Flows",
-    "summary": "List flows attached to a campaign",
+    "tag": "Subsequences",
+    "summary": "List subsequences attached to a campaign",
     "scope": "campaigns"
   },
   {
     "method": "get",
     "path": "/flows/campaigns/{campaignId}/stats",
-    "tag": "Flows",
+    "tag": "Subsequences",
     "summary": "Subsequence run stats for a campaign",
     "scope": "campaigns",
-    "description": "Per attached flow: leads currently active in a run, finished, and stopped-by-reply counts."
+    "description": "Per attached subsequence: leads currently active in a run, finished, and stopped-by-reply counts."
   },
   {
     "method": "post",
     "path": "/flows/campaigns/{campaignId}/attach",
-    "tag": "Flows",
-    "summary": "Attach a flow to a campaign",
+    "tag": "Subsequences",
+    "summary": "Attach a subsequence to a campaign",
     "scope": "campaigns",
-    "description": "Attaching (body flow_id) makes the flow's triggers apply to this campaign's leads. A flow can be attached to many campaigns; attaching twice is a no-op. Returns {attached:true}.",
+    "description": "Attaching (body flow_id) makes the subsequence's triggers apply to this campaign's leads. A subsequence can be attached to many campaigns; attaching twice is a no-op. Returns {attached:true}.",
     "body": true,
     "reqSchema": "FlowAttachInput"
   },
   {
     "method": "delete",
     "path": "/flows/campaigns/{campaignId}/detach/{flowId}",
-    "tag": "Flows",
-    "summary": "Detach a flow from a campaign",
+    "tag": "Subsequences",
+    "summary": "Detach a subsequence from a campaign",
     "scope": "campaigns",
-    "description": "Stops the flow from triggering for this campaign's leads (204). The flow itself and its other attachments are untouched."
+    "description": "Stops the subsequence from triggering for this campaign's leads (204). The subsequence itself and its other attachments are untouched."
   },
   {
     "method": "get",
     "path": "/flows",
-    "tag": "Flows",
-    "summary": "List flows",
+    "tag": "Subsequences",
+    "summary": "List subsequences",
     "scope": "campaigns"
   },
   {
     "method": "post",
     "path": "/flows",
-    "tag": "Flows",
-    "summary": "Create a flow",
+    "tag": "Subsequences",
+    "summary": "Create a subsequence",
     "scope": "campaigns",
-    "description": "Creates the flow shell: name (unique, 409 on duplicate), status draft|active|archived (default draft — only active flows run), trigger_config/exit_config as {keys: string[]} of lead status/label keys (trigger starts a run, exit ends it early). Add nodes with PUT /flows/{id}/graph and attach to campaigns to make it do anything. Returns 201.",
+    "description": "Creates the subsequence shell: name (unique, 409 on duplicate), status draft|active|archived (default draft — only active subsequences run), trigger_config/exit_config as {keys: string[]} of lead status/label keys (trigger starts a run, exit ends it early). Add nodes with PUT /flows/{id}/graph and attach to campaigns to make it do anything. Returns 201.",
     "body": true,
     "reqSchema": "FlowCreateInput",
     "idempotent": true
@@ -1861,36 +1862,36 @@ export const ROUTE_REGISTRY: RouteDef[] = [
   {
     "method": "get",
     "path": "/flows/{id}",
-    "tag": "Flows",
-    "summary": "Get a flow graph",
+    "tag": "Subsequences",
+    "summary": "Get a subsequence graph",
     "scope": "campaigns",
-    "description": "The flow's metadata plus its full node + edge graph (node config parsed into objects)."
+    "description": "The subsequence's metadata plus its full node + edge graph (node config parsed into objects)."
   },
   {
     "method": "patch",
     "path": "/flows/{id}",
-    "tag": "Flows",
-    "summary": "Update flow metadata",
+    "tag": "Subsequences",
+    "summary": "Update subsequence metadata",
     "scope": "campaigns",
-    "description": "Updates name/description/status/trigger_config/exit_config only — the node graph is replaced via PUT /flows/{id}/graph. Set status 'active' to arm the flow, 'draft'/'archived' to stop new runs.",
+    "description": "Updates name/description/status/trigger_config/exit_config only — the node graph is replaced via PUT /flows/{id}/graph. Set status 'active' to arm the subsequence, 'draft'/'archived' to stop new runs.",
     "body": true,
     "reqSchema": "FlowCreateInput"
   },
   {
     "method": "delete",
     "path": "/flows/{id}",
-    "tag": "Flows",
-    "summary": "Delete a flow",
+    "tag": "Subsequences",
+    "summary": "Delete a subsequence",
     "scope": "campaigns",
-    "description": "Deletes the flow, its graph and campaign attachments (204)."
+    "description": "Deletes the subsequence, its graph and campaign attachments (204)."
   },
   {
     "method": "put",
     "path": "/flows/{id}/graph",
-    "tag": "Flows",
-    "summary": "Replace flow nodes + edges",
+    "tag": "Subsequences",
+    "summary": "Replace subsequence nodes + edges",
     "scope": "campaigns",
-    "description": "Atomic full replacement of the flow's DAG: nodes and edges arrays are required (an optional flow object updates metadata in the same call). Node types include AI reply, email, LinkedIn connect/DM, call-task, wait and condition. Returns the saved graph.",
+    "description": "Atomic full replacement of the subsequence's DAG: nodes and edges arrays are required (an optional flow object updates metadata in the same call). Node types include AI reply, email, LinkedIn connect/DM, call-task, wait and condition. Returns the saved graph.",
     "body": true,
     "reqSchema": "FlowGraphInput"
   },
@@ -3695,6 +3696,14 @@ export const openapiSpec = { components: { schemas: {
           "null"
         ],
         "description": "ISO datetime; null = never"
+      },
+      "key_scope": {
+        "type": "string",
+        "enum": [
+          "workspace",
+          "instance"
+        ],
+        "description": "Default 'workspace' (bound to this workspace). 'instance' mints a super key that targets any workspace via the X-Workspace-Id header — permitted only when the caller is itself an instance key (403 otherwise)."
       }
     }
   },
@@ -3877,6 +3886,14 @@ export const openapiSpec = { components: { schemas: {
       "expires_at": {
         "type": "string",
         "description": "ISO datetime; omit for non-expiring"
+      },
+      "key_scope": {
+        "type": "string",
+        "enum": [
+          "workspace",
+          "instance"
+        ],
+        "description": "Default 'workspace'. A workspace-scoped caller may mint only 'workspace' keys for its own workspace; minting 'instance' requires an instance-scoped caller (403 otherwise)."
       }
     }
   },
