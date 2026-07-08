@@ -1,13 +1,12 @@
 name: Release
 
 # Publishes @outfalcon/falcon. Three ways in:
-#   • daily schedule / manual dispatch → sync the route registry from the backend; if it changed,
-#     bump the patch version and publish. (Dispatch can force-publish the current version.)
+#   • daily schedule / manual dispatch → regenerate the route registry from the PUBLIC OpenAPI spec;
+#     if it changed, bump the patch version and publish. (Dispatch can force-publish current version.)
 #   • push a tag v*.*.* → publish the current version (manual/code-only releases).
 #
-# Requires two repo secrets:
-#   • NPM_TOKEN         — an npm Automation token (bypasses 2FA), for publishing.
-#   • BACKEND_REPO_TOKEN — a read-only PAT for the private KStartups/Mailboxy repo (registry sync).
+# Only secret required: NPM_TOKEN (npm Automation token). No repo/backend access needed — the registry
+# is reconstructed from the public GET /api/v1/openapi.json.
 
 on:
   schedule:
@@ -31,23 +30,8 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    env:
-      # Lets steps skip cleanly when the backend PAT isn't configured yet (no daily-failure spam).
-      HAS_BACKEND_TOKEN: ${{ secrets.BACKEND_REPO_TOKEN != '' }}
     steps:
-      - name: Checkout CLI
-        uses: actions/checkout@v4
-
-      - name: Checkout backend route registry
-        if: github.event_name != 'push' && env.HAS_BACKEND_TOKEN == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: KStartups/Mailboxy
-          token: ${{ secrets.BACKEND_REPO_TOKEN }}
-          path: backend
-          sparse-checkout: |
-            src/api/v1/openapi.ts
-          sparse-checkout-cone-mode: false
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
@@ -57,11 +41,11 @@ jobs:
 
       - run: npm ci
 
-      - name: Sync registry from backend
+      - name: Sync registry from public spec
         id: sync
-        if: github.event_name != 'push' && env.HAS_BACKEND_TOKEN == 'true'
+        if: github.event_name != 'push'
         run: |
-          node scripts/sync-registry.mjs backend/src/api/v1/openapi.ts
+          node scripts/sync-registry.mjs
           if git diff --quiet -- src/vendor/openapi.ts; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "Registry unchanged."
@@ -81,7 +65,7 @@ jobs:
           git config user.name "outfalcon-bot"
           git config user.email "bot@outfalcon.dev"
           git add src/vendor/openapi.ts
-          git commit -m "chore: sync route registry from backend"
+          git commit -m "chore: sync route registry from public spec"
           npm version patch -m "release: v%s"
           git push --follow-tags origin HEAD:main
 

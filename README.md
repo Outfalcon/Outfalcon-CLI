@@ -255,15 +255,19 @@ also exits `1`.
 
 ## Keeping the command tree in sync
 
-Every command is generated from `src/vendor/openapi.ts` — a verbatim copy of the backend's route
-registry (a zero-import, pure-data module). CI refreshes it daily; to do it locally:
+Every command is generated from `src/vendor/openapi.ts`, which is itself reconstructed from the API's
+**public** `GET /api/v1/openapi.json` — so it stays current with no repo access and no secrets. CI
+refreshes it daily and publishes a patch when it changes; to do it locally:
 
 ```bash
-MAILBOXY_OPENAPI=/path/to/backend/src/api/v1/openapi.ts npm run sync:registry
+npm run sync:registry                 # default: the public prod spec
+# or point at another instance / a saved spec file:
+FALCON_OPENAPI_URL=https://my.instance/api/v1/openapi.json npm run sync:registry
+node scripts/sync-registry.mjs ./openapi.json
 npm run build && npm test
 ```
 
-The sync script refuses to vendor a file containing imports, so the bundle stays dependency-free.
+`src/vendor/openapi.ts` is auto-generated — edit the API (or the generator), not the vendored file.
 
 ## Develop
 
