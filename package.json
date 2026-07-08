@@ -1,0 +1,49 @@
+{
+  "name": "@outfalcon/falcon",
+  "version": "0.1.0",
+  "description": "Falcon — the CLI for the GTM Sequencer API. One command per API operation, generated from the live route registry.",
+  "bin": {
+    "falcon": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "sync:registry": "node scripts/sync-registry.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Outfalcon/Outfalcon-CLI.git"
+  },
+  "homepage": "https://github.com/Outfalcon/Outfalcon-CLI#readme",
+  "bugs": {
+    "url": "https://github.com/Outfalcon/Outfalcon-CLI/issues"
+  },
+  "keywords": [
+    "cold-email",
+    "outbound",
+    "cli",
+    "gtm",
+    "sequencer",
+    "api"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.3",
+    "vitest": "^4.0.18"
+  }
+}

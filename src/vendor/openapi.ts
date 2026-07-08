@@ -1,0 +1,1822 @@
+// OpenAPI 3.1 spec for the public /api/v1 surface, served at GET /api/v1/openapi.json.
+//
+// The spec is generated from a compact ROUTE_REGISTRY below so it stays in lockstep with the
+// routers without hand-writing hundreds of lines of YAML. A drift guard
+// (scripts/check-openapi-drift.ts) asserts every `router.<verb>(...)` in src/api/v1 has a
+// matching registry entry, so adding a route without documenting it fails CI.
+//
+// Request/response bodies are intentionally generic (object) — the registry's job is to make
+// every operation discoverable + callable by an agent/MCP client (method, path, auth, scope).
+// Richer per-field schemas can be layered on incrementally.
+
+export interface RouteDef {
+  method: "get" | "post" | "patch" | "put" | "delete";
+  path: string; // relative to /api/v1, e.g. "/campaigns/{id}"
+  tag: string;
+  summary: string;
+  /** Longer operation description: behavior, side effects, defaults, gotchas. Shown in the
+   *  spec/Scalar and appended to the MCP tool description so agents can act without guessing. */
+  description?: string;
+  scope: "campaigns" | "leads" | "accounts" | "inbox" | "team" | "none";
+  /** true if the operation accepts a JSON request body */
+  body?: boolean;
+  /** name of a component schema (components.schemas) describing the request body */
+  reqSchema?: string;
+  /** true if the operation supports the Idempotency-Key header */
+  idempotent?: boolean;
+  /** true if the operation supports cursor pagination (cursor query param) */
+  cursor?: boolean;
+  /** true if the operation can run asynchronously and return a job id (202) */
+  async?: boolean;
+  /** documented query parameters (filters) for this operation */
+  query?: Array<{ name: string; description?: string; enum?: string[] }>;
+  /** feature flag gating this operation (403 feature_disabled when the flag is off) */
+  flag?: "warmup" | "telephony" | "linkedin";
+}
+
+// Human-readable names for RouteDef.flag, used in spec + MCP tool descriptions.
+export const FLAG_LABELS: Record<NonNullable<RouteDef["flag"]>, string> = {
+  warmup: "email warmup (WARMUP_ENABLED)",
+  telephony: "the dialer (Twilio configured)",
+  linkedin: "LinkedIn (Unipile configured)",
+};
+
+// Shared query-param doc for the inbox feed/threads endpoints.
+const INBOX_FILTER_QUERY = [
+  {
+    name: "category",
+    description:
+      "Filter view. 'all' = campaign-linked & non-archived (excludes uncampaigned spam — use this for the primary inbox); " +
+      "also: unread, starred, archived, uncampaigned, interested, not_interested, meeting_booked, ooo, closed, " +
+      "irrelevant_marketing, or any custom label name. Omit for the raw feed (includes uncampaigned).",
+  },
+  { name: "search", description: "Match lead email/name/subject/preview" },
+  { name: "campaign_ids", description: "Comma-separated or repeated campaign ids" },
+  { name: "lead_statuses", description: "Comma-separated lead-status labels" },
+  { name: "account_ids", description: "Restrict to a subset of inbox ids" },
+  { name: "page" },
+  { name: "limit", description: "max 200" },
+];
+
+// Subscribable webhook event types (single source of truth; the webhooks route imports this).
+// Only events the codebase actually dispatches are listed — no advertising events we never fire.
+// (email.opened is intentionally absent: open tracking was removed from the product.)
+export const WEBHOOK_EVENT_TYPES = [
+  "email.sent",
+  "email.bounced",
+  "lead.replied",
+  "lead.interested",
+  "lead.unsubscribed",
+  "deliverability.alert",
+] as const;
+const EVENT_TYPES = WEBHOOK_EVENT_TYPES;
+
+// One entry per endpoint. Paths use OpenAPI {param} syntax.
+export const ROUTE_REGISTRY: RouteDef[] = [
+  // api-keys
+  { method: "get", path: "/api-keys", tag: "API Keys", summary: "List API keys", scope: "team",
+    description: "Keys for the active workspace with name, prefix, permissions and expiry — never the secret itself (only shown once at creation)." },
+  { method: "post", path: "/api-keys", tag: "API Keys", summary: "Create an API key", scope: "team",
+    description: "The response's `key` field is the full plaintext secret, returned only this once — store it immediately. permissions maps scopes (campaigns/leads/accounts/inbox/team) to access; empty {} = the key inherits its owner's role. Optional expires_at (ISO datetime). Returns 201.",
+    body: true, reqSchema: "ApiKeyCreateInput", idempotent: true },
+  { method: "get", path: "/api-keys/{id}", tag: "API Keys", summary: "Get an API key", scope: "team" },
+  { method: "patch", path: "/api-keys/{id}", tag: "API Keys", summary: "Update an API key", scope: "team",
+    description: "Updates name, permissions and/or is_active (false disables the key without deleting it — useful for temporary revocation). The secret itself can't be rotated; create a new key instead.",
+    body: true, reqSchema: "ApiKeyUpdateInput" },
+  { method: "delete", path: "/api-keys/{id}", tag: "API Keys", summary: "Delete an API key", scope: "team",
+    description: "Permanently revokes the key (204) — requests using it fail immediately. A key can delete itself; the current request still completes." },
+
+  // campaigns
+  { method: "get", path: "/campaigns", tag: "Campaigns", summary: "List campaigns", scope: "campaigns",
+    description: "Each row includes rollup counters (lead_count, step_count, total_sent/replied/bounced/positive) alongside settings and status.",
+    query: [{ name: "archived", description: "Set to 1/true to list archived campaigns instead of active ones", enum: ["1", "true"] }] },
+  { method: "post", path: "/campaigns", tag: "Campaigns", summary: "Create a campaign", scope: "campaigns",
+    description: "Creates a draft campaign pre-seeded with one empty step (order 1) and one 'A' variant at 100% weight — fill those in rather than adding a duplicate first step. An unknown/foreign group_id is stored as null. Returns 201.",
+    body: true, reqSchema: "CampaignCreateInput", idempotent: true },
+  { method: "delete", path: "/campaigns/bulk", tag: "Campaigns", summary: "Bulk delete campaigns", scope: "campaigns",
+    description: "Hard-deletes every listed campaign that belongs to this workspace; foreign/unknown ids are silently skipped. Returns {deleted} with the actual count. Irreversible — prefer status 'archived' (PATCH /campaigns/{id}/status) for a restorable hide.",
+    body: true, reqSchema: "IdsInput" },
+  { method: "get", path: "/campaigns/search-by-contact", tag: "Campaigns", summary: "Find campaigns containing a contact email", scope: "campaigns",
+    description: "Requires ?email= (case-insensitive exact match). Returns every campaign the address is enrolled in with the lead's status inside it (lead_status) and enrolled_at, newest enrollment first." },
+  { method: "get", path: "/campaigns/{id}", tag: "Campaigns", summary: "Get a campaign", scope: "campaigns",
+    description: "The full campaign in one call: every setting plus steps[] (with variants), lead_count, total_contacted/total_unsubscribed rollups, and the assigned inboxes under accounts[]." },
+  { method: "patch", path: "/campaigns/{id}", tag: "Campaigns", summary: "Update a campaign", scope: "campaigns",
+    description: "Partial update of campaign settings (name, group, schedule, limits, priorities, monitoring, agent_id...). Invalid enum/out-of-range values are silently skipped rather than erroring, so re-read the response to confirm what stuck. Does not change status — use PATCH /campaigns/{id}/status.",
+    body: true, reqSchema: "CampaignUpdateInput" },
+  { method: "delete", path: "/campaigns/{id}", tag: "Campaigns", summary: "Delete a campaign", scope: "campaigns",
+    description: "Hard delete (204) — permanent, including its steps, leads and history. For a restorable hide set status 'archived' via PATCH /campaigns/{id}/status." },
+  { method: "post", path: "/campaigns/{id}/duplicate", tag: "Campaigns", summary: "Duplicate a campaign", scope: "campaigns",
+    description: "Creates a draft copy named '<name> (Copy)' with all settings, steps + variants, inbox/tag assignments, and the same leads re-enrolled fresh at step 0 (status 'new'). Send history and counters are not copied. Returns the new campaign (201).",
+    idempotent: true },
+  { method: "patch", path: "/campaigns/{id}/status", tag: "Campaigns", summary: "Change campaign status", scope: "campaigns",
+    description: "Status: draft | active | paused | completed, or 'archived' (soft-hides the campaign and pauses it if active; setting any real status later un-archives it). Only 'active' campaigns send — assign inboxes (POST /campaigns/{id}/accounts) and add leads first. Invalid status returns 404.",
+    body: true, reqSchema: "CampaignStatusInput" },
+  { method: "get", path: "/campaigns/{id}/metrics", tag: "Campaigns", summary: "Campaign metrics", scope: "campaigns",
+    description: "Returns steps[] with variants (including Thompson-sampling win_probability), lead_counts by status, and totals with computed rates. Pass ?window=7|14|30 or ?start=YYYY-MM-DD&end=YYYY-MM-DD to scope totals to emails sent in that window (previous-period comparison under totals.prev); steps[] and lead_counts stay lifetime." },
+  { method: "get", path: "/campaigns/{id}/analytics-by-date", tag: "Campaigns", summary: "Campaign timeseries by date", scope: "campaigns",
+    description: "Query: interval=day|week (default day), start/end ISO dates. Same series shape as GET /analytics/timeseries, pre-scoped to this campaign." },
+  { method: "get", path: "/campaigns/{id}/sequences", tag: "Campaigns", summary: "List sequence steps + A/B variants", scope: "campaigns",
+    description: "Full editable sequence: steps ordered by step_order, each with its variants (label, weight, subject, body_html). Edit via POST /campaigns/{id}/steps and PATCH /campaigns/variants/{variantId}." },
+  { method: "post", path: "/campaigns/{id}/send-test-email", tag: "Campaigns", summary: "Send a rendered test email", scope: "campaigns",
+    description: "Renders step_order (default 1) / variant_label (default 'A') — optionally against a real lead_id for variable values — and sends one-off to `to`. Sends from the first active inbox assigned to the campaign; 422 if none is assigned. Returns 201 {sent:true,...}.",
+    body: true, reqSchema: "SendTestInput" },
+  { method: "post", path: "/campaigns/{id}/preview", tag: "Campaigns", summary: "Render a template preview", scope: "campaigns",
+    description: "Renders step_order (default 1) / variant_label (default 'A') without sending. Pass lead_id to substitute real lead values, and/or subject/body overrides to preview unsaved draft copy instead of the stored variant. Returns rendered {subject, body} plus the variant and lead rows.",
+    body: true, reqSchema: "PreviewInput" },
+  { method: "post", path: "/campaigns/{id}/steps", tag: "Campaigns", summary: "Add a step", scope: "campaigns",
+    description: "Appends an email step at the end of the sequence (step_order = max+1) with a default 'A' variant at 100% weight; defaults delay_days=1, delay_hours=0. To make it a LinkedIn step, PATCH the created step with channel='linkedin'.",
+    body: true, reqSchema: "CampaignStepInput" },
+  { method: "patch", path: "/campaigns/steps/{stepId}", tag: "Campaigns", summary: "Update a step", scope: "campaigns",
+    description: "Updates delay_days/delay_hours/step_order/channel. channel 'linkedin' takes action 'connection_request' or 'message' (defaults to 'message'); any other channel value resets the step to a plain email step. stepId comes from GET /campaigns/{id}/sequences.",
+    body: true, reqSchema: "CampaignStepInput" },
+  { method: "delete", path: "/campaigns/steps/{stepId}", tag: "Campaigns", summary: "Delete a step", scope: "campaigns",
+    description: "Deletes the step and its variants (204). Remaining steps keep their step_order — no renumbering happens." },
+  { method: "post", path: "/campaigns/steps/{stepId}/variants", tag: "Campaigns", summary: "Add a variant", scope: "campaigns",
+    description: "Adds an A/B variant to the step; label defaults to the next letter (B, C, ...). Weights are automatically rebalanced evenly across all of the step's variants. Set subject/body afterwards with PATCH /campaigns/variants/{variantId}. Returns 201.",
+    body: true, reqSchema: "VariantInput" },
+  { method: "patch", path: "/campaigns/variants/{variantId}", tag: "Campaigns", summary: "Update a variant", scope: "campaigns",
+    description: "Sets subject, body_html and/or weight. Weight is stored as-is — other variants are not rebalanced, so keep the step's weights summing to 100 yourself.",
+    body: true, reqSchema: "VariantInput" },
+  { method: "delete", path: "/campaigns/variants/{variantId}", tag: "Campaigns", summary: "Delete a variant", scope: "campaigns",
+    description: "Deletes the variant (204). Remaining variants' weights are not rebalanced." },
+  { method: "get", path: "/campaigns/{id}/accounts", tag: "Campaigns", summary: "List assigned inboxes", scope: "campaigns",
+    description: "Assigned sender inboxes with each assignment's type ('manual' or 'tag') and per-campaign send counters." },
+  { method: "post", path: "/campaigns/{id}/accounts", tag: "Campaigns", summary: "Assign an inbox", scope: "campaigns",
+    description: "Assigns one sender inbox (body account_id, from GET /email-accounts) to the campaign. 409 if already assigned, 404 for an account outside the workspace. Returns the assignment (201).",
+    body: true, reqSchema: "AccountAssignInput" },
+  { method: "post", path: "/campaigns/{id}/accounts/by-tag", tag: "Campaigns", summary: "Assign inboxes by tag", scope: "campaigns",
+    description: "Assigns every inbox carrying the tag and records a persistent tag link: accounts later added to/removed from the tag are auto-synced into/out of the campaign. Returns {added} (already-assigned inboxes don't count).",
+    body: true, reqSchema: "TagAssignInput" },
+  { method: "delete", path: "/campaigns/{id}/accounts/{accountId}", tag: "Campaigns", summary: "Remove an inbox", scope: "campaigns",
+    description: "Unassigns the inbox from the campaign (204). Note a tag-synced assignment can come back on the next tag sync — remove the account from the tag (or the tag from the campaign) instead for a lasting removal." },
+  { method: "get", path: "/campaigns/{id}/leads", tag: "Campaigns", summary: "List campaign leads", scope: "campaigns", cursor: true,
+    description: "Rows join campaign membership with lead fields; `id` is the campaign-lead id (clId) used by the message-history / status / remove endpoints — the lead's own id is `lead_id`. Passing ?cursor= switches from page/limit to keyset pagination." },
+  { method: "get", path: "/campaigns/{id}/leads/export", tag: "Campaigns", summary: "Export campaign leads as CSV", scope: "campaigns",
+    description: "Returns text/csv with fixed columns: email, first_name, last_name, company, title, status, current_step_order. Capped at 50k rows." },
+  { method: "post", path: "/campaigns/{id}/leads", tag: "Campaigns", summary: "Add leads from a list", scope: "campaigns",
+    description: "Enrolls every member of the lead list (body list_id) at step 0 with status 'new'; leads already in the campaign are skipped. Returns {added, skipped}. Blocklist/DNC is enforced at send time, not at enrollment. To enroll a single lead use POST /leads/{id}/push-to-campaign.",
+    body: true, reqSchema: "CampaignAddLeadsInput" },
+  { method: "get", path: "/campaigns/{id}/leads/{clId}/message-history", tag: "Campaigns", summary: "Full message thread for a campaign lead", scope: "campaigns",
+    description: "Resolves the campaign lead's email thread via its latest send and returns every message in it (sent + received). clId is the `id` from GET /campaigns/{id}/leads. Returns an empty array when nothing has been sent or no thread is linked yet." },
+  { method: "patch", path: "/campaigns/{id}/leads/{clId}", tag: "Campaigns", summary: "Update a campaign-lead status", scope: "campaigns",
+    description: "Status: new, sending, contacted, replied, interested, not_interested, bounced, completed, unsubscribed, skipped. 'completed' stops all future sends while keeping history (the engine only sends to 'new'/'contacted'). 'interested' also stamps positive_at (and 'not_interested'/'unsubscribed' stamp unsubscribed_at) on the latest send so analytics reflect manual outcomes.",
+    body: true, reqSchema: "CampaignLeadStatusInput" },
+  { method: "delete", path: "/campaigns/{id}/leads/{clId}", tag: "Campaigns", summary: "Remove a campaign lead", scope: "campaigns",
+    description: "Removes the lead's enrollment from the campaign (204); the lead itself and its lists are untouched. To stop sends but keep the enrollment history, set status 'completed' instead." },
+
+  // campaign-groups
+  { method: "get", path: "/campaign-groups", tag: "Campaign Groups", summary: "List campaign groups", scope: "campaigns" },
+  { method: "post", path: "/campaign-groups", tag: "Campaign Groups", summary: "Create a campaign group", scope: "campaigns",
+    description: "Groups nest via parent_group_id (an unknown/foreign parent is stored as null). File campaigns into a group with group_id on POST/PATCH /campaigns.",
+    body: true, reqSchema: "GroupInput" },
+  { method: "patch", path: "/campaign-groups/{id}", tag: "Campaign Groups", summary: "Update a campaign group", scope: "campaigns",
+    description: "Updates name, description, sort_order and/or parent_group_id (null or a foreign parent un-nests the group).",
+    body: true, reqSchema: "GroupUpdateInput" },
+  { method: "delete", path: "/campaign-groups/{id}", tag: "Campaign Groups", summary: "Delete a campaign group", scope: "campaigns",
+    description: "Deletes the group (204); campaigns inside it are not deleted — they just become ungrouped." },
+
+  // leads
+  { method: "get", path: "/leads/lists", tag: "Leads", summary: "List lead lists", scope: "leads", query: [{ name: "archived", description: "Set to 1/true to list archived lead lists instead of active ones", enum: ["1", "true"] }] },
+  { method: "post", path: "/leads/lists", tag: "Leads", summary: "Create a lead list", scope: "leads", body: true, reqSchema: "LeadListCreateInput" },
+  { method: "get", path: "/leads/lists/{id}", tag: "Leads", summary: "Get a lead list", scope: "leads" },
+  { method: "patch", path: "/leads/lists/{id}", tag: "Leads", summary: "Update a lead list", scope: "leads",
+    description: "Updates name, description and/or group_id (a lead-list-group id; unknown/foreign group ids are stored as null).",
+    body: true, reqSchema: "LeadListUpdateInput" },
+  { method: "delete", path: "/leads/lists/{id}", tag: "Leads", summary: "Delete a lead list", scope: "leads",
+    description: "Hard-deletes the list and its memberships (204). The lead records themselves survive (they may belong to other lists/campaigns), and campaign enrollments made from this list keep sending. Prefer POST /leads/lists/{id}/archive for a restorable hide." },
+  { method: "post", path: "/leads/lists/{id}/archive", tag: "Leads", summary: "Archive a lead list (hidden but restorable)", scope: "leads",
+    description: "Soft-hides the list from GET /leads/lists (visible via ?archived=1); leads and campaign enrollments are untouched. Restore with POST /leads/lists/{id}/unarchive." },
+  { method: "post", path: "/leads/lists/{id}/unarchive", tag: "Leads", summary: "Restore an archived lead list", scope: "leads" },
+  { method: "get", path: "/leads/lists/{id}/leads", tag: "Leads", summary: "List leads in a list", scope: "leads", cursor: true,
+    description: "Also accepts grid-filter query params: q (free text), source, email_type, email_status, esp, seg (protected|none), has_company, has_phone, var_key/var_values (custom-variable match), sort, dir. Passing ?cursor= switches from page/limit to keyset pagination." },
+  { method: "post", path: "/leads/lists/{id}/upload/preview", tag: "Leads", summary: "Preview a CSV import", scope: "leads",
+    description: "Parses csv_text without importing and returns {headers, preview (first 5 rows), total_rows} — use it to build the column mapping for POST /leads/lists/{id}/upload.",
+    body: true, reqSchema: "CsvPreviewInput" },
+  { method: "post", path: "/leads/lists/{id}/upload", tag: "Leads", summary: "Import leads from CSV", scope: "leads",
+    description: "mapping maps each CSV column to a lead field or 'custom:<name>'; an email mapping is required (400 otherwise). Upserts by email (existing workspace leads are updated, non-empty values win) and adds each lead to the list; source defaults to 'Imported'. Kicks off MX-based ESP/SEG enrichment — poll GET /leads/lists/{id}/enrichment-status. Returns {imported, skipped, errors}.",
+    body: true, reqSchema: "CsvImportInput" },
+  { method: "patch", path: "/leads/lists/bulk", tag: "Leads", summary: "Bulk move lists to a group", scope: "leads",
+    description: "Sets group_id on every listed lead list (null or an unknown/foreign group ungroups them). Returns {updated}.",
+    body: true, reqSchema: "BulkListMoveInput" },
+  { method: "get", path: "/leads/search", tag: "Leads", summary: "Search leads workspace-wide with filters (at least one filter required)", scope: "leads", cursor: true,
+    description: "All filters AND together; 400 when none is given (use the list endpoints for full dumps). Responds {data, meta:{total, next_cursor, has_more}} — pass meta.next_cursor back as ?cursor= to page.",
+    query: [
+    { name: "q", description: "Free-text across email/name/company/title" },
+    { name: "list_id", description: "Member of this lead list" },
+    { name: "tag_ids", description: "Has at least one of these tag ids (repeat or comma-separate)" },
+    { name: "excluded_tag_ids", description: "Has none of these tag ids" },
+    { name: "campaign_id", description: "Linked to this campaign" },
+    { name: "lead_statuses", description: "Campaign-lead status: new, sending, contacted, replied, interested, not_interested, bounced, completed, unsubscribed, skipped" },
+    { name: "campaign_status", description: "Status of the linking campaign (draft, active, paused, completed, archived)" },
+    { name: "emails_sent[gt]", description: "Emails-sent count comparators; also [lt] and [eq]" },
+    { name: "replies[gt]", description: "Reply count comparators; also [lt] and [eq]. (No opens filter — open tracking is not supported.)" },
+    { name: "created_after", description: "ISO date/datetime lower bound; also created_before" },
+    { name: "updated_after", description: "ISO date/datetime lower bound; also updated_before" },
+    { name: "email_status", description: "Verification status: valid, invalid, risky, catch_all, unknown" },
+    { name: "email_type", description: "personal, business, unknown" },
+    { name: "esp", description: "Recipient ESP: gmail, outlook, yahoo, apple, zoho, other, unknown" },
+    { name: "seg", description: "'protected' = behind a secure email gateway, 'none' = not", enum: ["protected", "none"] },
+    { name: "source", description: "Exact lead-source tag" },
+    { name: "has_company", enum: ["1", "true"] },
+    { name: "has_phone", enum: ["1", "true"] },
+    { name: "var_key", description: "Field/custom-variable whose value must match var_values" },
+    { name: "var_values", description: "Accepted values for var_key; omit for just 'present'" },
+  ] },
+  { method: "post", path: "/leads", tag: "Leads", summary: "Create a lead", scope: "leads",
+    description: "Never fails on duplicates: if the email already exists in the workspace this behaves as an update (non-empty incoming fields win, existing values are kept otherwise) and returns the existing lead. The lead's timezone is auto-resolved from city/state/location for recipient-timezone sending. Returns 201. Created leads belong to no list — add with POST /leads/{id}/move.",
+    body: true, reqSchema: "LeadInput", idempotent: true },
+  { method: "post", path: "/leads/bulk", tag: "Leads", summary: "Bulk create leads", scope: "leads",
+    description: "Synchronous upsert-by-email of up to 10,000 leads; responds 200 with {created, updated, errors} directly (errors lists per-index failures, e.g. missing email). For larger batches use POST /leads/bulk-upsert (async, up to 50,000).",
+    body: true, reqSchema: "LeadsBulkInput" },
+  { method: "post", path: "/leads/upsert", tag: "Leads", summary: "Create or update a lead by email", scope: "leads",
+    description: "Same merge semantics as POST /leads (non-empty incoming fields win) but the response tells you what happened: {lead, created} with 201 on create, 200 on update.",
+    body: true, reqSchema: "LeadInput", idempotent: true },
+  { method: "post", path: "/leads/bulk-upsert", tag: "Leads", summary: "Bulk create-or-update leads (async)", scope: "leads",
+    description: "Accepts up to 50,000 leads and returns 202 {data:{job_id}}; poll GET /jobs/{id} for the {created, updated, errors} result. Upsert-by-email with non-empty-field merge, same as POST /leads/bulk.",
+    body: true, reqSchema: "LeadsBulkInput", async: true },
+  { method: "get", path: "/leads/{id}", tag: "Leads", summary: "Get a lead", scope: "leads" },
+  { method: "patch", path: "/leads/{id}", tag: "Leads", summary: "Update a lead", scope: "leads",
+    description: "Partial update by lead id — only provided fields change, but unlike the upsert endpoints values are written as-is (an empty string clears a field). To merge fields by email instead, use POST /leads/upsert.",
+    body: true, reqSchema: "LeadInput" },
+  { method: "delete", path: "/leads/{id}", tag: "Leads", summary: "Delete a lead", scope: "leads",
+    description: "Hard-deletes the lead workspace-wide (204): list memberships and campaign enrollments cascade away. To only stop emailing, prefer blocklisting (POST /blocklist) or setting the campaign lead's status." },
+  { method: "get", path: "/leads/{id}/tags", tag: "Leads", summary: "List a lead's tags", scope: "leads" },
+  { method: "post", path: "/leads/{id}/tags", tag: "Leads", summary: "Add a tag to a lead", scope: "leads",
+    description: "Attaches an existing tag (body tag_id, from GET /tags — tags are shared workspace-wide with inbox tagging). Adding an already-attached tag is a no-op. Returns the lead's full tag list (201).",
+    body: true, reqSchema: "LeadTagAddInput" },
+  { method: "delete", path: "/leads/{id}/tags/{tagId}", tag: "Leads", summary: "Remove a tag from a lead", scope: "leads" },
+  { method: "post", path: "/leads/{id}/push-to-campaign", tag: "Leads", summary: "Add this lead to a campaign", scope: "leads",
+    description: "Enrolls the lead (path id = lead id) into body campaign_id at step 0 with status 'new'. Returns {added, already_present}: 201 when newly enrolled, 200 if it was already in the campaign.",
+    body: true, reqSchema: "PushToCampaignInput" },
+  { method: "post", path: "/leads/{id}/move", tag: "Leads", summary: "Move the lead into a list", scope: "leads",
+    description: "Adds the lead to to_list_id; pass from_list_id to also remove it from a source list (a true move). Without from_list_id this is additive — leads can belong to many lists.",
+    body: true, reqSchema: "LeadMoveInput" },
+
+  // lead-list-groups
+  { method: "get", path: "/lead-list-groups", tag: "Lead List Groups", summary: "List lead-list groups", scope: "leads" },
+  { method: "post", path: "/lead-list-groups", tag: "Lead List Groups", summary: "Create a lead-list group", scope: "leads",
+    description: "Groups nest via parent_group_id (an unknown/foreign parent is stored as null). File lists into a group with group_id on PATCH /leads/lists/{id} or PATCH /leads/lists/bulk.",
+    body: true, reqSchema: "GroupInput" },
+  { method: "patch", path: "/lead-list-groups/{id}", tag: "Lead List Groups", summary: "Update a lead-list group", scope: "leads",
+    description: "Updates name, description, sort_order and/or parent_group_id (null or a foreign parent un-nests the group).",
+    body: true, reqSchema: "GroupUpdateInput" },
+  { method: "delete", path: "/lead-list-groups/{id}", tag: "Lead List Groups", summary: "Delete a lead-list group", scope: "leads",
+    description: "Deletes the group (204); lead lists inside it are not deleted — they just become ungrouped." },
+
+  // email-accounts
+  { method: "get", path: "/email-accounts", tag: "Email Accounts", summary: "List email accounts", scope: "accounts", cursor: true,
+    description: "Every connected (non-deleted) sender inbox with connection-health fields (send_status/receive_status, send_error/receive_error, last_checked_at), sending settings (daily_limit, ramp-up) and tag_ids." },
+  { method: "get", path: "/email-accounts/metrics", tag: "Email Accounts", summary: "Per-account metrics", scope: "accounts",
+    description: "Sending performance per inbox: total sent, reply/positive/bounce rates, campaign count. Query ?window=7|14|30 (default all) or ?start=YYYY-MM-DD&end=YYYY-MM-DD; windowed ranges include a previous-period trend baseline." },
+  { method: "get", path: "/email-accounts/{id}", tag: "Email Accounts", summary: "Get an email account", scope: "accounts" },
+  { method: "patch", path: "/email-accounts/{id}", tag: "Email Accounts", summary: "Update an email account", scope: "accounts",
+    description: "Updates sending settings only: daily_limit, display_name, signature (null clears), rampup_enabled/rampup_start_daily/rampup_increment_daily. Enabling ramp-up resets its day counter to 0. Credentials can't be changed here — reconnect the account instead.",
+    body: true, reqSchema: "EmailAccountUpdateInput" },
+  { method: "delete", path: "/email-accounts/{id}", tag: "Email Accounts", summary: "Disconnect an email account", scope: "accounts",
+    description: "Soft delete (204): the inbox disappears from lists, stops sending/syncing, and is removed from all tags and campaign assignments — but its send history is preserved. There is no un-delete; reconnecting creates a fresh account." },
+  { method: "post", path: "/email-accounts/{id}/refresh", tag: "Email Accounts", summary: "Force a token refresh", scope: "accounts",
+    description: "Refreshes the OAuth access token now (Microsoft/Google accounts). No-op value for plain SMTP accounts. Use POST /email-accounts/{id}/recheck-connection to actually verify send/receive health." },
+  { method: "get", path: "/email-accounts/{id}/campaigns", tag: "Email Accounts", summary: "Campaigns using this account", scope: "accounts",
+    description: "Campaigns this inbox is assigned to, with each assignment's type ('manual' or 'tag') — useful before suspending/disconnecting an inbox." },
+  { method: "post", path: "/email-accounts", tag: "Email Accounts", summary: "Create an SMTP/IMAP account", scope: "accounts",
+    description: "Connects a plain SMTP/IMAP inbox (password stored encrypted). 409 if the email is already connected in the workspace. Optional tags is an array of tag NAMES — missing tags are created on the fly. Microsoft inboxes connect via GET /email-accounts/connect-link or POST /email-accounts/microsoft/bulk instead. Returns 201.",
+    body: true, reqSchema: "EmailAccountCreateInput", idempotent: true },
+  { method: "post", path: "/email-accounts/bulk", tag: "Email Accounts", summary: "Bulk add SMTP/IMAP accounts", scope: "accounts",
+    description: "Same per-account shape as POST /email-accounts; rows missing email/password/smtp_host/smtp_port or duplicating an existing email are skipped rather than failing the batch. Tag names auto-create. Returns {added, skipped, errors}.",
+    body: true, reqSchema: "EmailAccountsBulkInput" },
+  { method: "patch", path: "/email-accounts/bulk/daily-limit", tag: "Email Accounts", summary: "Bulk update daily limits", scope: "accounts",
+    description: "Sets daily_limit on every listed account in the workspace (foreign ids silently skipped). Returns {updated}. For signature/ramp-up too, use PATCH /email-accounts/bulk/settings.",
+    body: true, reqSchema: "BulkDailyLimitInput" },
+  { method: "post", path: "/email-accounts/{id}/suspend", tag: "Email Accounts", summary: "Suspend (pause) an account", scope: "accounts",
+    description: "Sets is_active=0 so the engine stops sending from this inbox (campaign assignments are kept). Reverse with POST /email-accounts/{id}/unsuspend." },
+  { method: "post", path: "/email-accounts/{id}/unsuspend", tag: "Email Accounts", summary: "Unsuspend (resume) an account", scope: "accounts" },
+
+  // inbox
+  { method: "get", path: "/inbox/feed", tag: "Inbox", summary: "Unified workspace-wide reply feed (message-level) across all inboxes", scope: "inbox",
+    description: "One message per row, newest activity first, filtered server-side over the full cache. Each row carries the accountId + conversationId + message id you need for the thread/read/label/send endpoints.",
+    query: INBOX_FILTER_QUERY },
+  { method: "get", path: "/inbox/threads", tag: "Inbox", summary: "Unified reply feed grouped into threads (one entry per conversation)", scope: "inbox",
+    description: "Same filters as /inbox/feed but one entry per conversation: the latest message plus per-thread counts and metadata (label, starred, archived, linked campaign/lead). Prefer this for building an inbox view.",
+    query: INBOX_FILTER_QUERY },
+  { method: "get", path: "/inbox/counts", tag: "Inbox", summary: "Inbox category/badge counts across the workspace", scope: "inbox",
+    description: "Per-category totals (unread, interested, custom labels, ...) computed over the full cache, independent of pagination. Optional ?account_ids= narrows to a subset of inboxes." },
+  { method: "get", path: "/inbox/{accountId}/inbox", tag: "Inbox", summary: "List inbox messages", scope: "inbox", cursor: true,
+    description: "Received messages for one inbox (accountId from GET /email-accounts). Paginates with ?top= (default 25) and ?skip=, plus ?search=. For the cross-inbox view use GET /inbox/feed or /inbox/threads." },
+  { method: "get", path: "/inbox/{accountId}/sent", tag: "Inbox", summary: "List sent messages", scope: "inbox",
+    description: "Sent messages for one inbox; paginates with ?top= (default 25) and ?skip=, plus ?search=." },
+  { method: "get", path: "/inbox/{accountId}/emails/{messageId}", tag: "Inbox", summary: "Get an email", scope: "inbox",
+    description: "Full message including body.content HTML. messageId is the provider message id from the list/feed endpoints (for SMTP inboxes it's the RFC Message-ID)." },
+  { method: "get", path: "/inbox/{accountId}/conversation/{conversationId}", tag: "Inbox", summary: "Get a conversation thread", scope: "inbox",
+    description: "Every message in the thread, oldest first. conversationId comes from message rows or /inbox/threads (for SMTP inboxes it's the thread-starting message's Message-ID)." },
+  { method: "post", path: "/inbox/{accountId}/send", tag: "Inbox", summary: "Send an email", scope: "inbox",
+    description: "Sends a new email from this inbox (accountId = the sender). Instead of subject/body you may pass template_id (+template_variables) to send a rendered reply template — explicit subject/body win over the template. Returns {messageId, graphMessageId, rfcMessageId} (201). This is a plain send: no campaign enrollment or tracking is created.",
+    body: true, reqSchema: "InboxSendInput", idempotent: true },
+  { method: "post", path: "/inbox/{accountId}/reply", tag: "Inbox", summary: "Reply to an email", scope: "inbox",
+    description: "Threads the send onto replyToMessageId (a message id from the thread — required). On Microsoft inboxes the provider keeps the thread's 'Re:' subject and ignores a custom subject; on SMTP inboxes the subject you pass is used verbatim (In-Reply-To/References headers are emitted for you). body may come from template_id; a template with a null subject keeps the thread subject. Returns 201.",
+    body: true, reqSchema: "InboxReplyInput", idempotent: true },
+  { method: "post", path: "/inbox/{accountId}/forward", tag: "Inbox", summary: "Forward an email", scope: "inbox",
+    description: "Sends to new recipients threaded off replyToMessageId (required). Note the original body is NOT auto-quoted — include the content you want forwarded in body.",
+    body: true, reqSchema: "InboxForwardInput", idempotent: true },
+  { method: "get", path: "/inbox/{accountId}/threads/metadata", tag: "Inbox", summary: "Thread metadata", scope: "inbox",
+    description: "All stored thread metadata rows (label, starred, archived, campaign/lead linkage) for this inbox, keyed by conversation_id." },
+  { method: "patch", path: "/inbox/{accountId}/threads/{conversationId}/metadata", tag: "Inbox", summary: "Update thread metadata", scope: "inbox",
+    description: "Sets label (built-in or custom label name), starred and/or archived on the thread. This only labels — use the /interested and /not-interested thread endpoints when the outcome should also update the campaign lead and fire webhooks.",
+    body: true, reqSchema: "ThreadMetadataInput" },
+
+  // tags
+  { method: "get", path: "/tags", tag: "Tags", summary: "List tags", scope: "accounts",
+    description: "Each tag includes account_ids — the sender inboxes carrying it. The same tag entities are also usable on leads (POST /leads/{id}/tags)." },
+  { method: "post", path: "/tags", tag: "Tags", summary: "Create a tag", scope: "accounts",
+    description: "name must be unique in the workspace (409 on duplicate); color defaults to gray (#6B7280). Returns 201 with empty account_ids — attach inboxes via PUT /tags/{id}/accounts.",
+    body: true, reqSchema: "TagInput" },
+  { method: "patch", path: "/tags/{id}", tag: "Tags", summary: "Update a tag", scope: "accounts",
+    description: "Renames and/or recolors the tag (409 if the new name already exists).",
+    body: true, reqSchema: "TagInput" },
+  { method: "delete", path: "/tags/{id}", tag: "Tags", summary: "Delete a tag", scope: "accounts",
+    description: "Deletes the tag (204) and its account/lead attachments; accounts and leads themselves are unaffected." },
+  { method: "put", path: "/tags/{id}/accounts", tag: "Tags", summary: "Set a tag's accounts", scope: "accounts",
+    description: "Full replacement: accountIds becomes the tag's exact inbox set (ids outside the workspace are silently dropped; [] clears it). Campaigns assigned via this tag are re-synced immediately — inboxes added here start sending in those campaigns, removed ones stop.",
+    body: true, reqSchema: "TagAccountsInput" },
+
+  // analytics
+  { method: "get", path: "/analytics/summary", tag: "Analytics", summary: "Workspace summary stats", scope: "campaigns",
+    description: "All /analytics/* endpoints share the same optional filters: campaign_ids, tag_ids, esp (all comma-separated), start/end (YYYY-MM-DD). Omit everything for workspace-lifetime totals." },
+  { method: "get", path: "/analytics/timeseries", tag: "Analytics", summary: "Time-series stats", scope: "campaigns",
+    description: "Sends/replies/bounces per bucket; ?interval=day (default) or week, plus the shared campaign_ids/tag_ids/esp/start/end filters." },
+  { method: "get", path: "/analytics/campaigns", tag: "Analytics", summary: "Per-campaign stats", scope: "campaigns",
+    description: "One row per campaign with its send/reply/bounce totals; accepts the shared campaign_ids/tag_ids/esp/start/end filters." },
+  { method: "get", path: "/analytics/response-stats", tag: "Analytics", summary: "Reply sentiment breakdown (positive/not-interested/neutral)", scope: "campaigns",
+    description: "Accepts the shared campaign_ids/tag_ids/esp/start/end filters (see GET /analytics/summary)." },
+  { method: "get", path: "/analytics/status-stats", tag: "Analytics", summary: "Campaign-lead status distribution", scope: "campaigns",
+    description: "Accepts the shared campaign_ids/tag_ids/esp/start/end filters (see GET /analytics/summary)." },
+  { method: "get", path: "/analytics/follow-up-rates", tag: "Analytics", summary: "Reply rate per sequence step", scope: "campaigns",
+    description: "Shows which follow-up step produces replies. Accepts the shared campaign_ids/tag_ids/esp/start/end filters (see GET /analytics/summary)." },
+  { method: "get", path: "/analytics/time-to-reply", tag: "Analytics", summary: "First-send to first-reply time distribution", scope: "campaigns",
+    description: "Accepts the shared campaign_ids/tag_ids/esp/start/end filters (see GET /analytics/summary)." },
+  { method: "get", path: "/analytics/by-hour", tag: "Analytics", summary: "Stats bucketed by hour-of-day of send", scope: "campaigns",
+    description: "Hour buckets are in UTC. Accepts the shared campaign_ids/tag_ids/esp/start/end filters." },
+
+  // team
+  { method: "get", path: "/team/me", tag: "Team", summary: "Current key identity + effective permissions", scope: "team",
+    description: "Who this API key acts as: {user_id, role, rbac_role, effective_permissions, api_key_id}. effective_permissions is the key's own scopes when it has any, otherwise the key owner's role permissions." },
+  { method: "get", path: "/team/roles", tag: "Team", summary: "List roles", scope: "team",
+    description: "System default roles (organization_id null, read-only) plus this workspace's custom roles, with their permissions JSON." },
+  { method: "post", path: "/team/roles", tag: "Team", summary: "Create a role", scope: "team",
+    description: "Creates a custom workspace role; permissions is a resource→access map. 409 on duplicate name; 403 unless the caller is an owner/admin when the role would grant team-management permission. Returns 201.",
+    body: true, reqSchema: "RoleCreateInput" },
+  { method: "get", path: "/team/roles/assignments", tag: "Team", summary: "List role assignments", scope: "team",
+    description: "user_id → role mappings for members of the active workspace. Users without an explicit assignment fall back to a default role." },
+  { method: "put", path: "/team/roles/assign", tag: "Team", summary: "Assign a role to a user", scope: "team",
+    description: "Upserts the member's single role in this workspace (replaces any prior assignment) and syncs it to the auth membership. You cannot change your own role (403), and only an owner/admin can hand out a role that grants team-management. The user must already be a member — invite first via POST /workspaces/{id}/invite.",
+    body: true, reqSchema: "RoleAssignInput" },
+  { method: "patch", path: "/team/roles/{id}", tag: "Team", summary: "Update a role", scope: "team",
+    description: "Updates a CUSTOM role's name/permissions (system default roles are read-only → 404 here). Permission changes take effect immediately for everyone holding the role.",
+    body: true, reqSchema: "RoleUpdateInput" },
+  { method: "delete", path: "/team/roles/{id}", tag: "Team", summary: "Delete a role", scope: "team",
+    description: "Deletes a custom role (default roles refuse with 400). Members holding it are reassigned to the default Member role." },
+
+  // webhooks
+  { method: "get", path: "/webhooks/event-types", tag: "Webhooks", summary: "List subscribable event types", scope: "team" },
+  { method: "get", path: "/webhooks", tag: "Webhooks", summary: "List webhooks", scope: "team" },
+  { method: "post", path: "/webhooks", tag: "Webhooks", summary: "Create a webhook", scope: "team",
+    description: "url must be a public http(s) endpoint (private/internal addresses are rejected, 400) and events a non-empty subset of GET /webhooks/event-types. Optional secret enables HMAC signatures on deliveries. Returns 201.",
+    body: true, reqSchema: "WebhookInput", idempotent: true },
+  { method: "get", path: "/webhooks/{id}", tag: "Webhooks", summary: "Get a webhook", scope: "team" },
+  { method: "patch", path: "/webhooks/{id}", tag: "Webhooks", summary: "Update a webhook", scope: "team",
+    description: "Partial update of url/events/description/secret, plus is_active to pause (false) or resume (true) deliveries without deleting the subscription. Same url/event validation as create.",
+    body: true, reqSchema: "WebhookInput" },
+  { method: "delete", path: "/webhooks/{id}", tag: "Webhooks", summary: "Delete a webhook", scope: "team" },
+  { method: "post", path: "/webhooks/{id}/test", tag: "Webhooks", summary: "Send a test event", scope: "team",
+    description: "Dispatches a sample {test:true} payload using the webhook's first subscribed event type. The delivery (and its response code) shows up in GET /webhooks/events like any real event." },
+  { method: "get", path: "/webhooks/events", tag: "Webhooks", summary: "Delivery log (observability)", scope: "team",
+    description: "Past delivery attempts with status codes; filter with ?webhook_id=, paginate with page/limit (max 200)." },
+  { method: "get", path: "/webhooks/events/summary", tag: "Webhooks", summary: "Delivery success/failure summary", scope: "team",
+    description: "Success/failure delivery counts, total and per event type — a cheap health check before digging into GET /webhooks/events." },
+  { method: "post", path: "/webhooks/events/{id}/retrigger", tag: "Webhooks", summary: "Re-send a past delivery", scope: "team",
+    description: "Re-sends the exact recorded payload of a past delivery (id from GET /webhooks/events) to the webhook's current URL. Returns {retriggered, status_code} with the receiving server's response code." },
+
+  // flows
+  { method: "get", path: "/flows/campaigns/{campaignId}", tag: "Flows", summary: "List flows attached to a campaign", scope: "campaigns" },
+  { method: "get", path: "/flows/campaigns/{campaignId}/stats", tag: "Flows", summary: "Subsequence run stats for a campaign", scope: "campaigns",
+    description: "Per attached flow: leads currently active in a run, finished, and stopped-by-reply counts." },
+  { method: "post", path: "/flows/campaigns/{campaignId}/attach", tag: "Flows", summary: "Attach a flow to a campaign", scope: "campaigns",
+    description: "Attaching (body flow_id) makes the flow's triggers apply to this campaign's leads. A flow can be attached to many campaigns; attaching twice is a no-op. Returns {attached:true}.",
+    body: true, reqSchema: "FlowAttachInput" },
+  { method: "delete", path: "/flows/campaigns/{campaignId}/detach/{flowId}", tag: "Flows", summary: "Detach a flow from a campaign", scope: "campaigns",
+    description: "Stops the flow from triggering for this campaign's leads (204). The flow itself and its other attachments are untouched." },
+  { method: "get", path: "/flows", tag: "Flows", summary: "List flows", scope: "campaigns" },
+  { method: "post", path: "/flows", tag: "Flows", summary: "Create a flow", scope: "campaigns",
+    description: "Creates the flow shell: name (unique, 409 on duplicate), status draft|active|archived (default draft — only active flows run), trigger_config/exit_config as {keys: string[]} of lead status/label keys (trigger starts a run, exit ends it early). Add nodes with PUT /flows/{id}/graph and attach to campaigns to make it do anything. Returns 201.",
+    body: true, reqSchema: "FlowCreateInput", idempotent: true },
+  { method: "get", path: "/flows/{id}", tag: "Flows", summary: "Get a flow graph", scope: "campaigns",
+    description: "The flow's metadata plus its full node + edge graph (node config parsed into objects)." },
+  { method: "patch", path: "/flows/{id}", tag: "Flows", summary: "Update flow metadata", scope: "campaigns",
+    description: "Updates name/description/status/trigger_config/exit_config only — the node graph is replaced via PUT /flows/{id}/graph. Set status 'active' to arm the flow, 'draft'/'archived' to stop new runs.",
+    body: true, reqSchema: "FlowCreateInput" },
+  { method: "put", path: "/flows/{id}/graph", tag: "Flows", summary: "Replace flow nodes + edges", scope: "campaigns",
+    description: "Atomic full replacement of the flow's DAG: nodes and edges arrays are required (an optional flow object updates metadata in the same call). Node types include AI reply, email, LinkedIn connect/DM, call-task, wait and condition. Returns the saved graph.",
+    body: true, reqSchema: "FlowGraphInput" },
+  { method: "delete", path: "/flows/{id}", tag: "Flows", summary: "Delete a flow", scope: "campaigns",
+    description: "Deletes the flow, its graph and campaign attachments (204)." },
+
+  // agents
+  { method: "get", path: "/agents", tag: "AI Agents", summary: "List reply agents", scope: "campaigns" },
+  { method: "post", path: "/agents", tag: "AI Agents", summary: "Create a reply agent", scope: "campaigns",
+    description: "An agent drafts (or, when autonomous with confidence above confidence_threshold, auto-sends) the first reply to lead responses. trigger_labels is an allow-list of reply classifications it acts on; null = default policy (everything except not_interested and irrelevant_marketing). Activate it by setting agent_id on a campaign (PATCH /campaigns/{id}). Returns 201.",
+    body: true, reqSchema: "AgentInput", idempotent: true },
+  { method: "get", path: "/agents/{id}", tag: "AI Agents", summary: "Get a reply agent", scope: "campaigns" },
+  { method: "patch", path: "/agents/{id}", tag: "AI Agents", summary: "Update a reply agent", scope: "campaigns",
+    description: "Partial update of agent settings. Setting trigger_labels to null restores the default label policy; an explicit array becomes a strict allow-list.",
+    body: true, reqSchema: "AgentInput" },
+  { method: "delete", path: "/agents/{id}", tag: "AI Agents", summary: "Delete a reply agent", scope: "campaigns",
+    description: "Deletes the agent with its documents and templates (204); campaigns pointing at it stop getting AI replies." },
+  { method: "get", path: "/agents/{id}/documents", tag: "AI Agents", summary: "List knowledge documents", scope: "campaigns" },
+  { method: "post", path: "/agents/{id}/documents", tag: "AI Agents", summary: "Upload a knowledge document", scope: "campaigns",
+    description: "Adds knowledge the agent cites when drafting: filename, file_type md|txt|pdf, and base64 content. PDFs are text-extracted server-side; oversized files return 413. Returns 201.",
+    body: true, reqSchema: "AgentDocumentInput" },
+  { method: "delete", path: "/agents/documents/{docId}", tag: "AI Agents", summary: "Delete a knowledge document", scope: "campaigns" },
+  { method: "get", path: "/agents/{id}/templates", tag: "AI Agents", summary: "List agent Q&A / follow-up templates", scope: "campaigns" },
+  { method: "post", path: "/agents/{id}/templates", tag: "AI Agents", summary: "Create an agent Q&A / follow-up template", scope: "campaigns",
+    description: "kind 'qa' pairs a lead question pattern (trigger) with your preferred answer (response); Q&A templates are injected into the drafting prompt so the agent adapts your approved answers instead of inventing its own. kind 'followup' is stored but unused since quiet-lead auto-followups were retired. Returns 201.",
+    body: true, reqSchema: "AgentTemplateInput" },
+  { method: "patch", path: "/agents/templates/{tid}", tag: "AI Agents", summary: "Update an agent Q&A / follow-up template", scope: "campaigns", body: true, reqSchema: "AgentTemplateInput" },
+  { method: "delete", path: "/agents/templates/{tid}", tag: "AI Agents", summary: "Delete an agent Q&A / follow-up template", scope: "campaigns" },
+
+  // deliverability
+  { method: "get", path: "/deliverability/health", tag: "Deliverability", summary: "Per-domain + per-inbox health rollup", scope: "accounts",
+    description: "Health status + trend per sending domain and per inbox. Optional filters: window=7|14|30 or start/end dates, tag_ids, domain/domains, account_ids." },
+  { method: "get", path: "/deliverability/timeseries", tag: "Deliverability", summary: "Deliverability time-series", scope: "accounts",
+    description: "Sends/replies/bounces/positives per bucket; ?interval=day (default) or week, plus the same window/tag_ids/domain/account_ids filters as /deliverability/health." },
+  { method: "get", path: "/deliverability/rules", tag: "Deliverability", summary: "List alert rules", scope: "accounts",
+    description: "First call seeds the workspace with default rules, so this is never empty. Rules define metric thresholds that fire the alert events listed under GET /deliverability/alerts (and the deliverability.alert webhook)." },
+  { method: "post", path: "/deliverability/rules", tag: "Deliverability", summary: "Create an alert rule", scope: "accounts",
+    description: "When the rule's metric crosses its threshold, an alert event is recorded (GET /deliverability/alerts) and the deliverability.alert webhook fires. Invalid metric/threshold combinations 400 with a validation message. Returns 201.",
+    body: true, reqSchema: "DeliverabilityRuleInput" , idempotent: true },
+  { method: "patch", path: "/deliverability/rules/{id}", tag: "Deliverability", summary: "Update an alert rule", scope: "accounts", body: true, reqSchema: "DeliverabilityRuleInput" },
+  { method: "delete", path: "/deliverability/rules/{id}", tag: "Deliverability", summary: "Delete an alert rule", scope: "accounts" },
+  { method: "get", path: "/deliverability/dns", tag: "Deliverability", summary: "SPF/DKIM/DMARC/MX for workspace domains", scope: "accounts",
+    description: "DNS auth records for every domain derived from the workspace's sender inboxes. Results are cached; pass ?force=1 to re-resolve everything now, or recheck one domain via POST /deliverability/dns/{domain}/recheck." },
+  { method: "post", path: "/deliverability/dns/{domain}/recheck", tag: "Deliverability", summary: "Re-check a domain's DNS", scope: "accounts",
+    description: "Re-resolves SPF/DKIM/DMARC/MX for one domain now and returns the fresh result. 404 if no workspace inbox uses the domain." },
+
+  // blocklist
+  { method: "get", path: "/blocklist", tag: "Blocklist", summary: "List blocklist entries", scope: "accounts",
+    description: "Filters: ?type=email|domain, ?q= substring match, page/limit (max 200). Each entry records its source (manual, bounce, complaint, unsubscribe)." },
+  { method: "post", path: "/blocklist", tag: "Blocklist", summary: "Add blocklist entries (single or bulk)", scope: "accounts",
+    description: "Accepts {value, type} or {entries:[{value, type}]}; values are trimmed/lowercased and duplicates skipped. Blocklisted emails/domains are skipped at send time by campaigns with skip_dnc enabled (the default); adding an entry doesn't change existing campaign-lead statuses — use the inbox unsubscribe-lead endpoint for that. Returns {added, skipped} (201).",
+    body: true, reqSchema: "BlocklistInput", idempotent: true },
+  { method: "delete", path: "/blocklist/{id}", tag: "Blocklist", summary: "Remove a blocklist entry", scope: "accounts" },
+
+  // labels
+  { method: "get", path: "/labels", tag: "Labels", summary: "List custom labels", scope: "inbox" },
+  { method: "post", path: "/labels", tag: "Labels", summary: "Create a custom label", scope: "inbox",
+    description: "name must be unique (409 on duplicate); color defaults to gray. Optional apply_when is a natural-language instruction the AI reply classifier uses to auto-apply the label to inbound replies (omitted, the classifier just goes by the label name). Apply to threads via the thread metadata endpoint or use as an inbox ?category= filter. Returns 201.",
+    body: true, reqSchema: "LabelInput" },
+  { method: "patch", path: "/labels/{id}", tag: "Labels", summary: "Update a custom label", scope: "inbox",
+    description: "Updates name/color/apply_when (omitted fields keep their value). Renaming does not retroactively update threads already labeled with the old name.",
+    body: true, reqSchema: "LabelInput" },
+  { method: "delete", path: "/labels/{id}", tag: "Labels", summary: "Delete a custom label", scope: "inbox" },
+
+  // jobs
+  { method: "get", path: "/jobs/{id}", tag: "Jobs", summary: "Poll an async job", scope: "none",
+    description: "id is the job_id from a 202 response. Returns {id, type, status (pending|running|completed|failed), progress, result, error}; result holds the operation's payload once status is 'completed'. Jobs expire and 404 after a retention window." },
+
+  // ignore phrases (reply-classifier suppression list)
+  { method: "get", path: "/ignore-phrases", tag: "Ignore Phrases", summary: "List reply-classifier ignore phrases", scope: "inbox" },
+  { method: "post", path: "/ignore-phrases", tag: "Ignore Phrases", summary: "Add an ignore phrase (inbound replies containing it are not treated as real replies)", scope: "inbox",
+    description: "Substring matched against inbound replies — a match means the message is not counted as a reply (sequences continue, no reply stats). Meant for ticket-system/auto-responder boilerplate. 409 on duplicate phrase. Returns 201.",
+    body: true, reqSchema: "IgnorePhraseInput", idempotent: true },
+  { method: "delete", path: "/ignore-phrases/{id}", tag: "Ignore Phrases", summary: "Delete an ignore phrase", scope: "inbox",
+    description: "Note: returns 200 {deleted:true} rather than 204." },
+
+  // email-accounts extras
+  { method: "get", path: "/email-accounts/connect-link", tag: "Email Accounts", summary: "Mint a signed workspace OAuth connect link (recipient can connect a Microsoft inbox into this workspace without logging in)", scope: "accounts",
+    description: "Returns {connect_url, ttl_ms}. The URL embeds an HMAC token that expires after ttl_ms — anyone opening it before then can OAuth a Microsoft inbox directly into this workspace, so share it carefully." },
+  { method: "patch", path: "/email-accounts/bulk/settings", tag: "Email Accounts", summary: "Bulk update settings (daily limit, signature, ramp-up) across accounts", scope: "accounts",
+    description: "Applies any of daily_limit, signature (null clears), rampup_enabled, rampup_start_daily, rampup_increment_daily to every listed account; 400 when no settings field is provided. Returns {updated}.",
+    body: true, reqSchema: "AccountsBulkSettingsInput" },
+
+  // inbox extras
+  { method: "get", path: "/inbox/{accountId}/threads/{conversationId}/activity", tag: "Inbox", summary: "Thread activity timeline (sends per step, replies, status changes)", scope: "inbox",
+    description: "Campaign-side timeline for the thread's linked lead: which sequence step fired when and what came back. 404 when the thread has no campaign activity (e.g. a manual conversation)." },
+  { method: "post", path: "/inbox/{accountId}/threads/{conversationId}/read", tag: "Inbox", summary: "Mark a thread read or unread (provider + cache)", scope: "inbox",
+    description: "Applies to every message in the thread, both on the mail provider (Graph/IMAP) and in the local cache. Body {read:false} marks unread; read defaults to true.",
+    body: true, reqSchema: "ThreadReadInput" },
+  { method: "post", path: "/inbox/{accountId}/threads/{conversationId}/interested", tag: "Inbox", summary: "Mark thread interested (labels + stamps the campaign lead, fires lead.interested)", scope: "inbox",
+    description: "Identical to what automatic reply-classification does for a positive reply: labels the thread 'interested' and, when a campaign lead is linked, sets it interested and fires the lead.interested webhook. Response {campaign_updated} tells you whether a linked lead was found." },
+  { method: "post", path: "/inbox/{accountId}/threads/{conversationId}/not-interested", tag: "Inbox", summary: "Mark thread not interested (labels, unsubscribes the campaign lead, auto-DNCs per workspace setting)", scope: "inbox",
+    description: "Labels the thread 'not_interested', flips the linked campaign lead to unsubscribed (stops its sequence, fires lead.unsubscribed), and adds the counterparty to the blocklist when the workspace auto-DNC setting (GET /blocklist/settings) is on. Response {campaign_updated} reports whether a linked lead was affected." },
+  { method: "post", path: "/inbox/{accountId}/threads/{conversationId}/unsubscribe-lead", tag: "Inbox", summary: "Unsubscribe the thread's counterparty from all campaigns (optionally blocklist)", scope: "inbox",
+    description: "Hard opt-out: stops the thread's linked campaign lead (fires lead.unsubscribed), then sweeps the same email to 'unsubscribed' in every other still-active campaign in the workspace. Body {add_to_blocklist:true} also adds the email to the blocklist. Returns {email, campaigns_stopped, blocklisted}; 404 if the counterparty email can't be resolved.",
+    body: true, reqSchema: "UnsubscribeLeadInput" },
+  { method: "post", path: "/inbox/{accountId}/threads/{conversationId}/push-to-campaign", tag: "Inbox", summary: "Add the thread's counterparty to a campaign", scope: "inbox",
+    description: "Resolves the thread's counterparty email and enrolls that lead into body campaign_id at step 0. If no lead record exists, pass create_lead:true to create one (otherwise 404). Returns {lead_id, email, campaign_id, outcome} where outcome is 'added' or 'exists'.",
+    body: true, reqSchema: "ThreadPushToCampaignInput" },
+
+  // scheduled emails (outbound queue visibility)
+  { method: "get", path: "/scheduled-emails", tag: "Scheduled Emails", summary: "Upcoming sends across the workspace, soonest first (?parked=1 lists held leads instead)", scope: "campaigns",
+    description: "Computed live from the engine's schedule state: each item is a campaign lead due to send its next step at next_send_at, with the campaign, lead, upcoming step and (after step 1) assigned inbox. Times are the engine's earliest-possible moment — the actual send also waits for the campaign's schedule window and limits.",
+    query: [
+    { name: "campaign_ids", description: "Comma-separated or repeated campaign ids" },
+    { name: "lead_ids", description: "Comma-separated or repeated lead ids" },
+    { name: "account_ids", description: "Sender inbox ids (only matches after step 1 — the inbox is assigned at first send)" },
+    { name: "from", description: "next_send_at lower bound (ISO datetime)" },
+    { name: "to", description: "next_send_at upper bound (ISO datetime)" },
+    { name: "parked", description: "1/true = leads the engine is holding (OOO resume, LinkedIn acceptance) instead of scheduled ones", enum: ["1", "true"] },
+    { name: "page" },
+    { name: "limit", description: "max 200" },
+  ] },
+  { method: "get", path: "/campaigns/{id}/scheduled-emails", tag: "Campaigns", summary: "This campaign's upcoming sends", scope: "campaigns",
+    description: "Same item shape as GET /scheduled-emails, pre-filtered to this campaign. Supports ?parked=1 plus page/limit." },
+  { method: "get", path: "/leads/{id}/scheduled-emails", tag: "Leads", summary: "This lead's upcoming sends across campaigns", scope: "leads",
+    description: "Same item shape as GET /scheduled-emails, pre-filtered to this lead across all campaigns. Supports ?parked=1 plus page/limit." },
+
+  // workspaces (agency surface: programmatic client onboarding)
+  { method: "get", path: "/workspaces", tag: "Workspaces", summary: "List workspaces the key owner belongs to", scope: "team",
+    description: "Visibility follows the key OWNER's memberships, not the key's workspace — each row includes the owner's membership role there. Workspace ids the owner isn't a member of 404 everywhere in this resource." },
+  { method: "post", path: "/workspaces", tag: "Workspaces", summary: "Create a workspace (key owner becomes its owner)", scope: "team",
+    description: "Requires owner/admin membership in the key's CURRENT workspace (403 otherwise). slug is optional (409 if taken). Typical agency flow: create the client workspace, mint its key with POST /workspaces/{id}/api-keys, then operate it with that key. Returns 201.",
+    body: true, reqSchema: "WorkspaceCreateInput", idempotent: true },
+  { method: "get", path: "/workspaces/{id}", tag: "Workspaces", summary: "Workspace details + membership role", scope: "team" },
+  { method: "get", path: "/workspaces/{id}/members", tag: "Workspaces", summary: "List workspace members", scope: "team" },
+  { method: "post", path: "/workspaces/{id}/invite", tag: "Workspaces", summary: "Invite an email into the workspace (sends the accept-invite email)", scope: "team",
+    description: "Requires owner/admin membership in the TARGET workspace. role is the membership level (member|admin); optional role_id pre-assigns a granular RBAC role applied when the invitee joins (404 if unknown). 409 if the email is already a member. Returns 201.",
+    body: true, reqSchema: "WorkspaceInviteInput", idempotent: true },
+  { method: "post", path: "/workspaces/{id}/api-keys", tag: "Workspaces", summary: "Mint an API key scoped to this workspace (plaintext returned once)", scope: "team",
+    description: "Requires owner/admin membership in the target workspace. The response's `key` field is the full plaintext secret and can never be retrieved again — store it now. Empty permissions {} = the key inherits the owner's role. Returns 201.",
+    body: true, reqSchema: "WorkspaceApiKeyInput", idempotent: true },
+  { method: "get", path: "/workspaces/{id}/stats", tag: "Workspaces", summary: "Workspace aggregates (campaigns, leads, inbox health, 30-day sends)", scope: "team" },
+
+  // reply templates (canned unibox responses; use via template_id on inbox send/reply)
+  { method: "get", path: "/reply-templates", tag: "Reply Templates", summary: "List reply templates", scope: "inbox" },
+  { method: "post", path: "/reply-templates", tag: "Reply Templates", summary: "Create a reply template (subject null = keep thread subject on reply)", scope: "inbox",
+    description: "body (required) and subject support the campaign template syntax: {{variables}}, conditionals, spintax and sender_* fields. name must be unique (409). Use the template on a send via template_id on POST /inbox/{accountId}/send or /reply. Returns 201.",
+    body: true, reqSchema: "ReplyTemplateInput", idempotent: true },
+  { method: "get", path: "/reply-templates/{id}", tag: "Reply Templates", summary: "Get a reply template", scope: "inbox" },
+  { method: "patch", path: "/reply-templates/{id}", tag: "Reply Templates", summary: "Update a reply template", scope: "inbox",
+    description: "Partial update of name/subject/body (409 if the new name collides). Set subject to null to make replies keep the thread subject.",
+    body: true, reqSchema: "ReplyTemplateInput" },
+  { method: "delete", path: "/reply-templates/{id}", tag: "Reply Templates", summary: "Delete a reply template", scope: "inbox",
+    description: "Note: returns 200 {deleted:true} rather than 204." },
+  { method: "post", path: "/reply-templates/{id}/preview", tag: "Reply Templates", summary: "Render a template against a lead/account (returns unresolved variables too)", scope: "inbox",
+    description: "Optional lead_id fills lead variables, account_id fills sender_* variables, and `variables` supplies explicit overrides. The response includes the rendered subject/body plus any {{variables}} that could not be resolved — check that list before sending.",
+    body: true, reqSchema: "ReplyTemplatePreviewInput" },
+
+  // campaign-lead bulk ops
+  { method: "post", path: "/campaigns/{id}/leads/move", tag: "Campaigns", summary: "Move leads to another campaign (restart at step 0; skips leads already in the target)", scope: "campaigns",
+    description: "to_campaign_id is required; narrow the selection with campaign_lead_ids and/or statuses, or omit both to move EVERY lead in the source. Moved leads re-enter the target at step 0 with status 'new'; leads already present in the target are skipped and left untouched in the source. Returns {moved, skipped}; 404 when source = target.",
+    body: true, reqSchema: "CampaignLeadsMoveInput" },
+  { method: "patch", path: "/campaigns/{id}/leads/bulk", tag: "Campaigns", summary: "Bulk set campaign-lead status (use 'completed' to stop future emails)", scope: "campaigns",
+    description: "Same status semantics as the single-lead PATCH (status enum, outcome stamping on the latest send); campaign_lead_ids are the `id` values from GET /campaigns/{id}/leads. Returns {updated} — ids not in this campaign don't count.",
+    body: true, reqSchema: "CampaignLeadsBulkStatusInput" },
+
+  // warmup (feature-gated behind WARMUP_ENABLED)
+  { method: "get", path: "/warmup/settings", tag: "Warmup", summary: "Workspace warmup settings (filter tag, toggles, pool size)", scope: "accounts", flag: "warmup",
+    description: "Returns {enabled, filterTag, tagEnabled, tagInOutgoing, poolSize, poolDomains}. filterTag is the hidden token stamped on warmup mail for inbox filtering; poolSize/poolDomains describe the instance-wide (cross-workspace) partner pool — tiny pools warm slowly." },
+  { method: "put", path: "/warmup/settings", tag: "Warmup", summary: "Update workspace warmup toggles (tagEnabled, tagInOutgoing)", scope: "accounts", flag: "warmup", body: true, reqSchema: "WarmupSettingsInput" },
+  { method: "post", path: "/warmup/settings/regenerate-tag", tag: "Warmup", summary: "Mint a fresh warmup filter tag (future sends only)", scope: "accounts", flag: "warmup",
+    description: "Returns the new {filterTag}. Already-sent warmup mail keeps the old tag, so filters matching the old tag stop catching new mail — update them." },
+  { method: "post", path: "/warmup/accounts/bulk", tag: "Warmup", summary: "Apply one warmup settings patch to many inboxes", scope: "accounts", flag: "warmup",
+    description: "Body {accountIds, patch} where patch takes the same fields as PUT /warmup/accounts/{id} (warmup_enabled, warmup_profile_id, warmup_daily_limit, ramp-up fields, warmup_reply_rate). Returns {updated} — ids outside the workspace are skipped.",
+    body: true, reqSchema: "WarmupBulkInput" },
+  { method: "put", path: "/warmup/accounts/{id}", tag: "Warmup", summary: "Update per-inbox warmup settings (enable, daily limit, ramp-up, reply rate)", scope: "accounts", flag: "warmup",
+    description: "warmup_enabled opts the inbox into the pool; warmup_profile_id (null/'' clears) picks the copy profile it converses with. Non-numeric values for the numeric fields are silently skipped.",
+    body: true, reqSchema: "WarmupAccountPatchInput" },
+  { method: "post", path: "/warmup/accounts/{id}/reinstate", tag: "Warmup", summary: "Lift a bounce quarantine on a warmup inbox", scope: "accounts", flag: "warmup",
+    description: "Re-enables warmup sending for an inbox the system quarantined after bounces. 404 when the account isn't quarantined (or isn't yours)." },
+  { method: "get", path: "/warmup/analytics", tag: "Warmup", summary: "Warmup analytics: totals, daily series, per-ESP breakdown, per-inbox rollup", scope: "accounts", flag: "warmup", query: [
+    { name: "days", description: "Window in days (default 30)" },
+    { name: "tags", description: "Comma-separated account-tag ids to narrow to inboxes carrying any of them" },
+  ] },
+  { method: "get", path: "/warmup/profiles", tag: "Warmup", summary: "List warmup copy profiles", scope: "accounts", flag: "warmup",
+    description: "Copy profiles make warmup conversations resemble your real offer. Each row includes generation status and how many inboxes are assigned." },
+  { method: "post", path: "/warmup/profiles", tag: "Warmup", summary: "Create a warmup copy profile (template generation runs async)", scope: "accounts", flag: "warmup",
+    description: "Requires name (unique, 409 on duplicate) and offer_description of at least ~2 sentences (400 otherwise); optional example_copy and offer_ratio. Returns {id} (201) immediately while the AI template bank generates in the background — watch the profile's status in GET /warmup/profiles. Assign to inboxes via warmup_profile_id.",
+    body: true, reqSchema: "WarmupProfileInput" },
+  { method: "patch", path: "/warmup/profiles/{id}", tag: "Warmup", summary: "Update a warmup copy profile (offer/example changes regenerate the bank)", scope: "accounts", flag: "warmup", body: true, reqSchema: "WarmupProfileInput" },
+  { method: "post", path: "/warmup/profiles/{id}/regenerate", tag: "Warmup", summary: "Rebuild a profile's template bank from the same inputs", scope: "accounts", flag: "warmup" },
+  { method: "delete", path: "/warmup/profiles/{id}", tag: "Warmup", summary: "Delete a warmup copy profile", scope: "accounts", flag: "warmup",
+    description: "Deletes the profile (204); inboxes assigned to it fall back to generic warmup conversation." },
+  { method: "get", path: "/warmup/recent", tag: "Warmup", summary: "Most recent warmup emails (subject, parties, status, preview)", scope: "accounts", flag: "warmup",
+    description: "Warmup mail is hidden from the unibox, so this is the only window into it. Returns {emails, total}, newest first.",
+    query: [
+    { name: "limit", description: "max 100 (default 20)" },
+    { name: "offset" },
+  ] },
+
+  // ai-replies (reviewable AI reply drafts in the unibox)
+  { method: "get", path: "/ai-replies", tag: "AI Replies", summary: "Pending AI drafts for a thread + whether it's eligible for AI replies", scope: "inbox",
+    description: "Returns {drafts, eligible} — drafts is the thread's pending drafts (usually 0 or 1); eligible=false means POST /ai-replies/regenerate would 422 (no reply agent is wired to this thread's campaign).",
+    query: [
+    { name: "accountId", description: "Inbox the thread lives in (required)" },
+    { name: "conversationId", description: "Thread id (required)" },
+  ] },
+  { method: "post", path: "/ai-replies/regenerate", tag: "AI Replies", summary: "Generate a fresh reviewable draft for a thread (optional tone override)", scope: "inbox",
+    description: "Body {accountId, conversationId, tone?} — tone (professional|friendly|casual|formal) overrides the agent's default for this draft only. Generates synchronously and returns the new pending draft (201); 422 when the thread has no agent-enabled campaign or generation fails. Nothing is sent until POST /ai-replies/{id}/send.",
+    body: true, reqSchema: "AiReplyRegenerateInput" },
+  { method: "post", path: "/ai-replies/{id}/send", tag: "AI Replies", summary: "Send a pending draft (optionally with edited subject/body)", scope: "inbox",
+    description: "Sends the draft as a reply in its thread; pass subject/body to send an edited version (persisted on the draft). Only 'pending' drafts send — 409 once it's sent/discarded, 422 if no recipient can be resolved. Returns the updated draft.",
+    body: true, reqSchema: "AiReplyDraftSendInput" },
+  { method: "post", path: "/ai-replies/{id}/discard", tag: "AI Replies", summary: "Discard a pending draft", scope: "inbox",
+    description: "Moves a pending draft to 'discarded' (204) — reversible via POST /ai-replies/{id}/restore." },
+  { method: "post", path: "/ai-replies/{id}/restore", tag: "AI Replies", summary: "Restore a discarded draft to pending", scope: "inbox" },
+
+  // tasks (rep task queue: call tasks from flows etc.)
+  { method: "get", path: "/tasks", tag: "Tasks", summary: "List tasks in the rep queue", scope: "inbox",
+    description: "Tasks are created by automation flows (e.g. call-task nodes, which pause the run until the task is resolved via POST /tasks/{id}/complete).",
+    query: [
+    { name: "status", description: "Task status filter (default open)" },
+    { name: "assigned", description: "'me' = only tasks assigned to the key owner", enum: ["me"] },
+  ] },
+  { method: "post", path: "/tasks/{id}/complete", tag: "Tasks", summary: "Resolve a task manually (optionally logging a call disposition)", scope: "inbox",
+    description: "Completes an open task (409 if it isn't open). An optional disposition is recorded and also mirrored onto the task's linked call recording, so flow condition nodes waiting on the task read it back and the paused flow run resumes.",
+    body: true, reqSchema: "TaskCompleteInput" },
+
+  // integrations (provider credentials, e.g. Cal.com / AI keys)
+  { method: "get", path: "/integrations", tag: "Integrations", summary: "List integration configs for every provider (no plaintext secrets)", scope: "team",
+    description: "Secrets are write-only: responses only reveal whether each secret field is set, never its value." },
+  { method: "get", path: "/integrations/{provider}", tag: "Integrations", summary: "Get one provider's integration config", scope: "team",
+    description: "provider is one of the known provider slugs from GET /integrations (e.g. calcom, anthropic, openai, resend); unknown slugs 404." },
+  { method: "put", path: "/integrations/{provider}", tag: "Integrations", summary: "Upsert a provider's credentials (per-field merge; null/empty clears)", scope: "team",
+    description: "Body {public?, secrets?, is_enabled?}. Per-field merge semantics: omitted fields keep their stored value, null/'' clears a field. Secrets are stored encrypted and never returned — the response only shows set/unset flags.",
+    body: true, reqSchema: "IntegrationUpsertInput" },
+
+  // alerts (inbox send-health)
+  { method: "get", path: "/alerts/summary", tag: "Alerts", summary: "Counts of failing inboxes, affected active campaigns, and unacknowledged deliverability alerts", scope: "accounts",
+    description: "\"Failing\" = send_status 'error' (a real send was denied) or is_active 0 (dead token/login, engine skips it). Returns {count, campaignIds (active campaigns using a failing inbox), deliverabilityCount, totalCount}." },
+  { method: "get", path: "/alerts/inboxes", tag: "Alerts", summary: "Paginated failing inboxes with their error + the active campaigns they hold up", scope: "accounts",
+    description: "Each row: inbox identity, send_status/is_active, the error message, last_checked_at, and the active campaigns assigned to it. Fix credentials then verify with POST /email-accounts/{id}/recheck-connection.",
+    query: [
+    { name: "top", description: "Page size, max 200 (default 50)" },
+    { name: "skip" },
+  ] },
+
+  // deliverability alert events
+  { method: "get", path: "/deliverability/alerts", tag: "Deliverability", summary: "Fired deliverability-alert history + unacknowledged count", scope: "accounts",
+    description: "Returns {events, total, unacked} — events are instances where an alert rule's threshold was crossed, newest first.",
+    query: [
+    { name: "acknowledged", description: "true/1 = only acknowledged, false/0 = only unacknowledged; omit for all", enum: ["true", "false", "1", "0"] },
+    { name: "top", description: "Page size, max 200 (default 50)" },
+    { name: "skip" },
+  ] },
+  { method: "post", path: "/deliverability/alerts/{id}/ack", tag: "Deliverability", summary: "Acknowledge one alert event (id 'all' acknowledges every unacknowledged event)", scope: "accounts" },
+
+  // blocklist extras
+  { method: "get", path: "/blocklist/settings", tag: "Blocklist", summary: "Workspace auto-DNC settings", scope: "accounts",
+    description: "Returns {dncOnNotInterested, dncBlockDomain}: whether marking a thread not-interested auto-blocklists the counterparty's email (default true) and whether that blocks their whole domain (default false)." },
+  { method: "patch", path: "/blocklist/settings", tag: "Blocklist", summary: "Update workspace auto-DNC settings", scope: "accounts",
+    description: "Booleans only; non-boolean values are ignored. Returns the effective settings after the update.",
+    body: true, reqSchema: "BlocklistSettingsInput" },
+  { method: "post", path: "/blocklist/import", tag: "Blocklist", summary: "Bulk import blocklist entries (duplicates skipped)", scope: "accounts",
+    description: "Same effect as POST /blocklist with entries[]; rows with a missing value or a type other than email|domain are counted as skipped. Returns {imported, skipped}.",
+    body: true, reqSchema: "BlocklistImportInput" },
+  { method: "get", path: "/blocklist/export", tag: "Blocklist", summary: "Export the blocklist as CSV (returns text/csv)", scope: "accounts", query: [
+    { name: "type", description: "Restrict to one entry type", enum: ["email", "domain"] },
+  ] },
+
+  // lead extras
+  { method: "get", path: "/leads/by-email", tag: "Leads", summary: "Look up a single lead by email", scope: "leads",
+    description: "Returns 200 {lead} — lead is null when no match exists (this endpoint never 404s on a miss).",
+    query: [
+    { name: "email", description: "Lead email address (required)" },
+  ] },
+  { method: "get", path: "/leads/lists/{id}/facets", tag: "Leads", summary: "Distinct sources + custom-variable keys for a list (filter building)", scope: "leads",
+    description: "Returns {sources, variables} — the values usable in the list-grid filters' source and var_key params." },
+  { method: "get", path: "/leads/lists/{id}/facets/values", tag: "Leads", summary: "Distinct values of one field/custom variable in a list", scope: "leads", query: [
+    { name: "key", description: "Field or custom-variable key (required)" },
+  ] },
+  { method: "get", path: "/leads/lists/{id}/enrichment-status", tag: "Leads", summary: "MX-classification progress for a list (poll after an import)", scope: "leads",
+    description: "Returns {total_domains, pending_domains}; enrichment (ESP/SEG detection) is done when pending_domains reaches 0." },
+  { method: "delete", path: "/leads/lists/{id}/leads", tag: "Leads", summary: "Bulk-remove leads matching the query filters from a list (at least one filter required)", scope: "leads",
+    description: "Removes matching leads' membership from THIS list only; a lead's record is fully deleted only when nothing else (another list or a campaign) references it. 400 without a constraining filter — deleting the whole list is DELETE /leads/lists/{id}. Returns {removed, deleted}.",
+    query: [
+    { name: "q", description: "Free-text filter" },
+    { name: "source" }, { name: "email_type" }, { name: "email_status" }, { name: "esp" },
+    { name: "seg", enum: ["protected", "none"] },
+    { name: "has_company", enum: ["1", "true"] }, { name: "has_phone", enum: ["1", "true"] },
+    { name: "var_key" }, { name: "var_values" },
+  ] },
+  { method: "get", path: "/leads/lists/{id}/leads/export", tag: "Leads", summary: "Export a list's leads as CSV, honoring filters (returns text/csv)", scope: "leads",
+    description: "columns accepts lead field keys AND custom-variable keys (unknown keys export empty); default columns are first_name, last_name, email, title, company, seg, esp, linkedin, website. Not paginated (capped at 100k rows).",
+    query: [
+    { name: "columns", description: "Comma-separated lead field keys ('name' = first + last); defaults to a sensible set" },
+    { name: "q" }, { name: "source" }, { name: "email_type" }, { name: "email_status" }, { name: "esp" },
+    { name: "seg", enum: ["protected", "none"] },
+    { name: "has_company", enum: ["1", "true"] }, { name: "has_phone", enum: ["1", "true"] },
+    { name: "var_key" }, { name: "var_values" },
+  ] },
+
+  // team extras
+  { method: "get", path: "/team/roles/pending-assignments", tag: "Team", summary: "Email-to-role mappings for pending invites", scope: "team" },
+  { method: "put", path: "/team/roles/assign-pending", tag: "Team", summary: "Pre-assign a role for an invited email", scope: "team",
+    description: "Upserts an email→role mapping applied automatically when that email accepts its invite and joins the workspace. Usually set implicitly by POST /workspaces/{id}/invite with role_id.",
+    body: true, reqSchema: "AssignPendingRoleInput" },
+  { method: "post", path: "/team/revoke-user", tag: "Team", summary: "Remove a user's role assignment in this workspace (post-removal cleanup)", scope: "team",
+    description: "Deletes only this workspace's role assignment for the user (their other workspaces are untouched). This does NOT remove the workspace membership itself — it's the cleanup step after removing the member via the auth surface.",
+    body: true, reqSchema: "RevokeUserInput" },
+
+  // agent extras
+  { method: "post", path: "/agents/enhance-prompt", tag: "AI Agents", summary: "Rewrite a rough agent prompt into a structured one", scope: "campaigns",
+    description: "Returns {prompt} — the rewritten text only; nothing is saved. Apply it yourself via PATCH /agents/{id}. 422 when no AI key is configured or generation fails.",
+    body: true, reqSchema: "EnhancePromptInput" },
+  { method: "get", path: "/agents/calcom-event-types", tag: "AI Agents", summary: "List the workspace's Cal.com event types", scope: "campaigns",
+    description: "Uses the workspace's Cal.com integration (PUT /integrations/calcom). Use an event type's id as an agent's calcom_event_type_id." },
+  { method: "post", path: "/agents/test-calcom", tag: "AI Agents", summary: "Diagnose Cal.com booking: the times we'd currently propose for an event type", scope: "campaigns",
+    description: "Returns {ok, slots, bookingUrl, keySource, reason?}: the availability the agent would offer right now. ok=false explains why (no_api_key, no_event_type, no_slots, ...) — run this before enabling calcom_enabled on an agent.",
+    body: true, reqSchema: "TestCalcomInput" },
+
+  // campaign extras (spintax + organization labels)
+  { method: "post", path: "/campaigns/spintax/generate", tag: "Campaigns", summary: "Generate AI spintax variations woven into subject/body copy", scope: "campaigns",
+    description: "Takes finished copy (body required, subject optional) and returns it with {option a|option b} spintax groups woven in; creativity subtle|balanced|creative (default balanced) controls how aggressively, instructions constrains the edit. Requires a workspace AI key — 422 when none is configured or generation fails. Save the result onto a variant yourself (PATCH /campaigns/variants/{variantId}).",
+    body: true, reqSchema: "SpintaxGenerateInput" },
+  { method: "get", path: "/campaigns/labels", tag: "Campaigns", summary: "Campaign organization labels (not inbox labels), grouped by campaign id", scope: "campaigns",
+    description: "One call for the whole workspace: {labels: {<campaignId>: Label[]}}. These are list-view organization tags — unrelated to inbox thread labels (/labels)." },
+  { method: "post", path: "/campaigns/{id}/labels", tag: "Campaigns", summary: "Add an organization label to a campaign", scope: "campaigns",
+    description: "name required, optional color. 409 when the campaign already has a label with that name. Returns {label} (201).",
+    body: true, reqSchema: "CampaignLabelInput" },
+  { method: "delete", path: "/campaigns/{id}/labels/{labelId}", tag: "Campaigns", summary: "Remove an organization label from a campaign", scope: "campaigns" },
+
+  // email-accounts extras (health recheck + bulk Microsoft upload tracking)
+  { method: "post", path: "/email-accounts/{id}/recheck-connection", tag: "Email Accounts", summary: "Probe send + receive connection health now and return the fresh status", scope: "accounts",
+    description: "Runs the live health probe (SMTP login / IMAP / Microsoft token) synchronously and returns the updated send_status/receive_status/errors row. A failing status pauses campaign sending from this inbox until it recovers." },
+  { method: "get", path: "/email-accounts/uploads", tag: "Email Accounts", summary: "Bulk Microsoft upload history, rolled up per upload with per-domain batch status counts", scope: "accounts" },
+  { method: "get", path: "/email-accounts/uploads/{batchId}/items", tag: "Email Accounts", summary: "Per-account items for one bulk-upload batch", scope: "accounts",
+    description: "batchId comes from the batches returned by POST /email-accounts/microsoft/bulk or from GET /email-accounts/uploads. Each item tracks one inbox's connect progress/outcome." },
+  { method: "post", path: "/email-accounts/microsoft/bulk", tag: "Email Accounts", summary: "Bulk-import Microsoft inboxes via the external uploader, one batch per email domain (503 when the uploader is not configured on this server)", scope: "accounts",
+    description: "Each account needs email + password; credentials are forwarded to the uploader, never stored. Accounts are grouped by email domain — one batch/browser session per domain, all sharing one workspace connect link. Returns {submitted, batches, failedDomains}; track progress via GET /email-accounts/uploads (502 if no domain could be submitted).",
+    body: true, reqSchema: "MicrosoftBulkInput", idempotent: true },
+
+  // calls (dialer; feature-gated on Twilio configuration)
+  { method: "get", path: "/calls/recordings", tag: "Calls", summary: "List call recordings (paginated, filterable)", scope: "inbox", flag: "telephony", query: [
+    { name: "page", description: "1-based page (default 1)" },
+    { name: "size", description: "Page size, max 100 (default 25)" },
+    { name: "conversationId", description: "Only calls attached to this inbox thread" },
+    { name: "campaignId", description: "Only calls linked to this campaign" },
+    { name: "agent", description: "Only calls by this agent name" },
+    { name: "status", description: "Call status (e.g. completed, no-answer)" },
+    { name: "disposition", description: "Manual disposition (e.g. booked_meeting, declined_meeting)" },
+  ] },
+  { method: "get", path: "/calls/recordings/{id}", tag: "Calls", summary: "Get one call recording's metadata", scope: "inbox", flag: "telephony",
+    description: "Includes has_audio (whether GET /calls/recordings/{id}/audio will serve bytes), transcript, disposition, agent/lead names and campaign linkage." },
+  { method: "patch", path: "/calls/recordings/{id}", tag: "Calls", summary: "Set or clear a call's manual disposition", scope: "inbox", flag: "telephony",
+    description: "Body {disposition} — a known disposition value (e.g. booked_meeting, declined_meeting; 400 lists valid values on mismatch) or null to clear. Setting a disposition also resolves any open call task for the lead and resumes flows waiting on it.",
+    body: true, reqSchema: "RecordingDispositionInput" },
+  { method: "get", path: "/calls/recordings/{id}/audio", tag: "Calls", summary: "Stream a recording's audio — returns audio/mpeg, supports Range", scope: "inbox", flag: "telephony",
+    description: "Raw audio/mpeg bytes (no JSON envelope); honors Range headers with 206 responses for seeking. 404 when the recording has no stored audio file." },
+  { method: "get", path: "/calls/phone-numbers", tag: "Calls", summary: "List the workspace's rented phone-number pool", scope: "inbox", flag: "telephony",
+    description: "Each number includes its daily dial cap and today's dial count — the dialer picks local-presence numbers from this pool." },
+  { method: "post", path: "/calls/phone-numbers", tag: "Calls", summary: "Rent a local number for a US area code (~$1.50/mo)", scope: "inbox", flag: "telephony",
+    description: "area_code must be a 3-digit US area code. Purchases the number from Twilio immediately (real recurring cost). 409 when no number is purchasable in that area code. Returns the rented number (201).",
+    body: true, reqSchema: "PhoneNumberRentInput" },
+  { method: "delete", path: "/calls/phone-numbers/{id}", tag: "Calls", summary: "Release a rented phone number", scope: "inbox", flag: "telephony",
+    description: "Releases the number back to Twilio (billing stops; the number is gone for good). Returns 200 {ok:true}." },
+
+  // linkedin (Unipile-backed; feature-gated on Unipile configuration)
+  { method: "post", path: "/linkedin/connect-link", tag: "LinkedIn", summary: "Create a Unipile hosted-auth URL to connect (or reconnect) a LinkedIn account into this workspace", scope: "inbox", flag: "linkedin",
+    description: "Creates a pending LinkedIn account row and returns {url, accountId}: complete the LinkedIn login at the URL and the account activates via webhook. Pass reconnectAccountId to re-authenticate an existing LinkedIn account in place instead of creating a new one.",
+    body: true, reqSchema: "LinkedInConnectLinkInput" },
+  { method: "get", path: "/linkedin/accounts/{accountId}/connection", tag: "LinkedIn", summary: "Connection state with a LinkedIn member (invitation pending / accepted / never invited)", scope: "inbox", flag: "linkedin",
+    description: "Returns {status, invitedAt, acceptedAt}; status is 'pending', 'accepted', or null when we never sent an invitation through this system (they may still be connected outside it).",
+    query: [
+    { name: "providerId", description: "The other party's stable LinkedIn member id (a LinkedIn message's from_address)" },
+  ] },
+  { method: "post", path: "/linkedin/accounts/{accountId}/send", tag: "LinkedIn", summary: "Send a LinkedIn DM (starts a chat if none exists; HTML bodies are converted to plain text)", scope: "inbox", flag: "linkedin",
+    description: "Target is the member's stable provider id, passed as `to` or `conversationId` (LinkedIn threads are keyed by member id, not chat id). Sends into the existing chat, starting one when none exists or the stored chat went stale after a reconnect. Returns {messageId, conversationId}.",
+    body: true, reqSchema: "LinkedInSendInput" },
+];
+
+function pathParams(path: string): Array<{ name: string; in: "path"; required: true; schema: { type: "string" } }> {
+  return [...path.matchAll(/\{(\w+)\}/g)].map((m) => ({
+    name: m[1],
+    in: "path" as const,
+    required: true as const,
+    schema: { type: "string" as const },
+  }));
+}
+
+// Sidebar/tag order for docs + MCP: tags listed here render in this order, grouped into the
+// x-tagGroups sections below. Operations are emitted tag-by-tag (registry order within a tag),
+// so late-appended routes still sit with their resource instead of trailing at the bottom.
+export const TAGS: Array<{ name: string; description: string }> = [
+  // Getting started / account plumbing
+  { name: "Workspaces", description: "Agency surface: create client workspaces, invite members, mint workspace-scoped API keys, and read rollup stats. A key sees exactly the workspaces its owner user is a member of." },
+  { name: "API Keys", description: "Manage API keys for the current workspace. Keys carry per-resource scopes (campaigns, leads, accounts, inbox, team); empty scopes inherit the key owner's role." },
+  { name: "Team", description: "Granular RBAC inside the workspace: custom roles, role assignments (including pre-assignments for invitees), and member revocation." },
+  // Sending infrastructure
+  { name: "Email Accounts", description: "Sender inboxes: connect (SMTP/IMAP directly, Microsoft via connect-link or bulk upload), configure limits/signatures/ramp-up, suspend/resume, and monitor connection health." },
+  { name: "Tags", description: "Inbox tags used to group sender accounts (e.g. by domain batch or client) and to assign accounts to campaigns in bulk." },
+  { name: "Warmup", description: "Email warmup pool: per-account enable/limits, warmup profiles, quarantine reinstatement, and warmup analytics." },
+  { name: "Deliverability", description: "Domain/inbox health rollups, SPF/DKIM/DMARC/MX checks, alert rules, and alert events." },
+  { name: "Alerts", description: "Failing-inbox alerts: which sender accounts are erroring or paused, workspace-wide." },
+  // Leads
+  { name: "Leads", description: "Leads and lead lists: CSV import, upsert, tags, advanced filtered search, facets, enrichment status, exports, and pushing leads into campaigns." },
+  { name: "Lead List Groups", description: "Folders for organizing lead lists." },
+  // Campaigns
+  { name: "Campaigns", description: "Sequenced outbound campaigns: steps + A/B variants, schedule and sending settings, sender-account assignment, per-campaign leads, metrics, previews and test sends." },
+  { name: "Campaign Groups", description: "Folders for organizing campaigns." },
+  { name: "Scheduled Emails", description: "The outbound queue: which lead sends next, when, and from which inbox — computed live from the engine's schedule state." },
+  { name: "Flows", description: "Subsequences / automation flows: trigger on lead status or label, then run a graph of AI-reply, email, LinkedIn, call-task, wait and condition nodes." },
+  { name: "AI Agents", description: "AI reply agents attached to campaigns: prompt/persona, knowledge documents, Q&A templates, and Cal.com scheduling helpers." },
+  // Inbox
+  { name: "Inbox", description: "The unified inbox across all sender accounts: read messages and threads, send/reply/forward, label outcomes (interested / not interested), unsubscribe, and push repliers into campaigns." },
+  { name: "AI Replies", description: "AI-drafted replies awaiting review: list, regenerate, approve-and-send, discard, restore." },
+  { name: "Reply Templates", description: "Canned unibox responses rendered with the campaign template engine ({{variables}}, conditionals, spintax, sender_*). Use one on a send via template_id on inbox send/reply." },
+  { name: "Tasks", description: "Human to-dos generated by flows (call tasks, wait-for-human-reply): list and complete." },
+  { name: "Labels", description: "Custom inbox labels for categorizing threads (beyond the built-in interested / not_interested / etc.)." },
+  { name: "Ignore Phrases", description: "Phrases that make the reply classifier ignore an inbound message (ticket systems, auto-responders)." },
+  { name: "Calls", description: "Dialer surface: call recordings (with audio), dispositions, and the rented local-presence phone-number pool." },
+  { name: "LinkedIn", description: "LinkedIn channel: hosted connect links, connection state per account, and direct-message sending." },
+  // Measurement & platform
+  { name: "Analytics", description: "Workspace and campaign analytics: summaries, time series, reply sentiment, follow-up step rates, time-to-reply, hour-of-day breakdowns." },
+  { name: "Blocklist", description: "Do-not-contact list (emails + domains) with import/export and auto-DNC settings. Blocklisted addresses are never emailed." },
+  { name: "Webhooks", description: "Outbound event subscriptions with HMAC signatures, delivery logs, retriggers and test events. See the spec's webhooks section for payload shapes." },
+  { name: "Integrations", description: "Provider credentials (Resend, Anthropic, OpenAI, Cal.com) stored per workspace; secrets are write-only." },
+  { name: "Jobs", description: "Poll async jobs returned by bulk operations (202 responses)." },
+];
+
+// Scalar sidebar sections (x-tagGroups). Every tag above must appear in exactly one group.
+// Exported so the Falcon CLI can group its `--help` command tree by the same sections.
+export const TAG_GROUPS: Array<{ name: string; tags: string[] }> = [
+  { name: "Account & Access", tags: ["Workspaces", "API Keys", "Team"] },
+  { name: "Sending Infrastructure", tags: ["Email Accounts", "Tags", "Warmup", "Deliverability", "Alerts"] },
+  { name: "Leads", tags: ["Leads", "Lead List Groups"] },
+  { name: "Campaigns & Automation", tags: ["Campaigns", "Campaign Groups", "Scheduled Emails", "Flows", "AI Agents"] },
+  { name: "Inbox & Engagement", tags: ["Inbox", "AI Replies", "Reply Templates", "Tasks", "Labels", "Ignore Phrases", "Calls", "LinkedIn"] },
+  { name: "Analytics & Platform", tags: ["Analytics", "Blocklist", "Webhooks", "Integrations", "Jobs"] },
+];
+
+function buildPaths(): Record<string, Record<string, unknown>> {
+  const paths: Record<string, Record<string, unknown>> = {};
+  // Emit operations grouped by TAGS order (registry order within a tag) so the docs sidebar
+  // and MCP tool list read as coherent resource sections. Unknown tags (shouldn't happen) last.
+  const tagOrder = new Map(TAGS.map((t, i) => [t.name, i]));
+  const ordered = [...ROUTE_REGISTRY].sort(
+    (a, b) => (tagOrder.get(a.tag) ?? 999) - (tagOrder.get(b.tag) ?? 999)
+  );
+  for (const r of ordered) {
+    const params: any[] = pathParams(r.path);
+    if (r.cursor) {
+      params.push({ name: "cursor", in: "query", required: false, schema: { type: "string" }, description: "Opaque cursor for forward pagination" });
+      params.push({ name: "limit", in: "query", required: false, schema: { type: "integer", maximum: 200 } });
+    }
+    if (r.idempotent) {
+      params.push({ name: "Idempotency-Key", in: "header", required: false, schema: { type: "string" }, description: "Safe-retry key; replays the original response" });
+    }
+    if (r.query) {
+      for (const q of r.query) {
+        params.push({ name: q.name, in: "query", required: false, schema: q.enum ? { type: "string", enum: q.enum } : { type: "string" }, description: q.description });
+      }
+    }
+    const descParts = [
+      r.description,
+      r.flag ? `Requires ${FLAG_LABELS[r.flag]}; returns 403 feature_disabled when off.` : undefined,
+    ].filter(Boolean);
+    const op: Record<string, unknown> = {
+      tags: [r.tag],
+      summary: r.summary,
+      ...(descParts.length ? { description: descParts.join(" ") } : {}),
+      operationId: `${r.method}_${r.path.replace(/[/{}]/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "")}`,
+      security: [{ ApiKeyHeader: [] }, { BearerKey: [] }],
+      parameters: params,
+      responses: {
+        ...(r.async ? { "202": { description: "Accepted — returns a job id to poll", content: { "application/json": { schema: { $ref: "#/components/schemas/JobAccepted" } } } } } : {}),
+        "200": { description: "Success", content: { "application/json": { schema: { $ref: "#/components/schemas/SuccessEnvelope" } } } },
+        "400": { description: "Bad request", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+        "401": { description: "Missing/invalid API key", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+        "403": { description: "API key lacks the required scope", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+        "404": { description: "Not found", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+        "429": { description: "Rate limited", content: { "application/json": { schema: { $ref: "#/components/schemas/ErrorEnvelope" } } } },
+      },
+    };
+    if (r.scope !== "none") (op as any)["x-required-scope"] = r.scope;
+    if (r.body) {
+      op.requestBody = {
+        required: true,
+        content: {
+          "application/json": {
+            schema: r.reqSchema ? { $ref: `#/components/schemas/${r.reqSchema}` } : { type: "object", additionalProperties: true },
+          },
+        },
+      };
+    }
+    const oasPath = "/api/v1" + r.path;
+    paths[oasPath] = paths[oasPath] || {};
+    paths[oasPath][r.method] = op;
+  }
+  return paths;
+}
+
+// OpenAPI 3.1 `webhooks`: describe the requests WE send to a subscriber's URL per event, so a
+// consumer can discover the payload shape (and the identifiers needed to act on it) from the spec.
+function buildWebhooks(): Record<string, unknown> {
+  // event -> which data fields are present
+  const events: Record<string, { lead?: boolean; campaign?: boolean; send?: boolean; thread?: boolean; reply?: boolean; alert?: boolean }> = {
+    "email.sent": { lead: true, campaign: true, send: true },
+    "email.bounced": { lead: true, campaign: true, send: true },
+    "lead.replied": { lead: true, campaign: true, send: true, thread: true, reply: true },
+    "lead.interested": { lead: true, campaign: true, send: true, thread: true, reply: true },
+    "lead.unsubscribed": { lead: true, campaign: true, thread: true, reply: true },
+    "deliverability.alert": { alert: true },
+  };
+  const out: Record<string, unknown> = {};
+  for (const [name, spec] of Object.entries(events)) {
+    const dataProps: Record<string, unknown> = {};
+    if (spec.lead) dataProps.lead = { $ref: "#/components/schemas/WebhookLead" };
+    if (spec.campaign) dataProps.campaign = { $ref: "#/components/schemas/WebhookCampaign" };
+    if (spec.send) dataProps.send = { $ref: "#/components/schemas/WebhookSend" };
+    if (spec.thread) dataProps.thread = { $ref: "#/components/schemas/WebhookThread" };
+    if (spec.reply) dataProps.reply = { $ref: "#/components/schemas/WebhookReply" };
+    if (spec.alert) dataProps.alert = { $ref: "#/components/schemas/WebhookAlert" };
+    const dataSchema = { type: "object", properties: dataProps };
+    out[name] = {
+      post: {
+        summary: `Sent when: ${name}`,
+        description:
+          "Delivered as POST to your subscribed url. If the webhook has a secret, an " +
+          "X-Webhook-Signature header carries the HMAC-SHA256 of the raw body.",
+        requestBody: {
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                properties: {
+                  event: {
+                    type: "object",
+                    properties: { type: { type: "string", enum: [name] }, timestamp: { type: "string" } },
+                  },
+                  data: dataSchema,
+                },
+              },
+            },
+          },
+        },
+        responses: { "2XX": { description: "Acknowledged by the subscriber" } },
+      },
+    };
+  }
+  return out;
+}
+
+export const openapiSpec = {
+  openapi: "3.1.0",
+  info: {
+    title: "GTM Sequencer API",
+    version: "1.0.0",
+    description:
+      "Agentic-first API for the GTM email sequencer. Authenticate with an API key via the " +
+      "`x-api-key` header or `Authorization: Bearer mk_live_…`. Keys are workspace-scoped and " +
+      "carry per-resource scopes (campaigns, leads, accounts, inbox, team). " +
+      "Rate limit: 100 requests/minute per key (see X-RateLimit-* response headers). " +
+      "Mutating requests accept an `Idempotency-Key` header for safe retries; large bulk " +
+      "operations return a job id (202) to poll at GET /api/v1/jobs/{id}.",
+  },
+  servers: [{ url: "/", description: "Same-origin" }],
+  tags: TAGS,
+  "x-tagGroups": TAG_GROUPS,
+  components: {
+    securitySchemes: {
+      ApiKeyHeader: { type: "apiKey", in: "header", name: "x-api-key" },
+      BearerKey: { type: "http", scheme: "bearer", bearerFormat: "mk_live_*" },
+    },
+    schemas: {
+      SuccessEnvelope: {
+        type: "object",
+        properties: { data: {}, meta: { type: "object", additionalProperties: true } },
+        required: ["data"],
+      },
+      ErrorEnvelope: {
+        type: "object",
+        properties: { error: { type: "object", properties: { message: { type: "string" } }, required: ["message"] } },
+        required: ["error"],
+      },
+      JobAccepted: {
+        type: "object",
+        properties: { data: { type: "object", properties: { job_id: { type: "string" } } }, meta: { type: "object" } },
+      },
+
+      // ---- Request body schemas (mirror the route handlers' accepted fields) ----
+      AgentInput: {
+        type: "object",
+        required: ["name"],
+        properties: {
+          name: { type: "string" },
+          company_name: { type: "string" },
+          company_domain: { type: "string" },
+          tone: { type: "string", enum: ["professional", "friendly", "casual", "formal"], default: "professional" },
+          prompt: { type: "string", description: "The agent's reply instructions" },
+          provider: { type: "string", enum: ["anthropic", "openai"], default: "anthropic" },
+          model: { type: "string", description: "Provider model id (defaults per provider)" },
+          autonomous: { type: "integer", enum: [0, 1], description: "1 = auto-send above confidence_threshold" },
+          confidence_threshold: { type: "number", minimum: 0, maximum: 1, default: 0.8 },
+          calcom_enabled: { type: "integer", enum: [0, 1], description: "1 = agent may propose Cal.com times" },
+          calcom_event_type_id: { type: ["string", "null"], description: "Cal.com event-type id to book against" },
+          trigger_labels: {
+            type: ["array", "null"],
+            items: { type: "string" },
+            description:
+              "Reply classifications the agent acts on (e.g. [\"interested\",\"meeting_booked\"] or workspace custom-label names). null = default policy: act on everything except not_interested and irrelevant_marketing.",
+          },
+        },
+      },
+      AgentDocumentInput: {
+        type: "object",
+        required: ["filename", "file_type", "content_base64"],
+        properties: {
+          filename: { type: "string" },
+          file_type: { type: "string", enum: ["md", "txt", "pdf"] },
+          content_base64: { type: "string", description: "Base64-encoded file contents" },
+        },
+      },
+      AgentTemplateInput: {
+        type: "object",
+        required: ["kind", "trigger", "response"],
+        properties: {
+          kind: { type: "string", enum: ["qa", "followup"] },
+          trigger: { type: "string", description: "When this template applies (matched by the agent)" },
+          response: { type: "string" },
+        },
+      },
+      WebhookInput: {
+        type: "object",
+        required: ["url", "events"],
+        properties: {
+          url: { type: "string", format: "uri" },
+          events: {
+            type: "array",
+            items: { type: "string", enum: [...EVENT_TYPES] },
+            description: "Event types to subscribe to",
+          },
+          secret: { type: "string", description: "HMAC-SHA256 signing secret (sent as X-Webhook-Signature)" },
+          description: { type: "string" },
+        },
+      },
+      DeliverabilityRuleInput: {
+        type: "object",
+        required: ["name", "metric", "comparator", "threshold"],
+        properties: {
+          name: { type: "string" },
+          metric: { type: "string", enum: ["bounce_rate", "reply_rate", "positive_rate", "sends"] },
+          comparator: { type: "string", enum: ["above", "below", "drops_by_pct"] },
+          threshold: { type: "number", description: "Rate (0..1) or count, per metric" },
+          window_days: { type: "integer", default: 7 },
+          scope: { type: "string", enum: ["all", "tag", "domain", "inbox"], default: "all" },
+          scope_value: { type: ["string", "null"], description: "tag id / domain / inbox id when scope != all" },
+          min_sends: { type: "integer", default: 30 },
+          cooldown_hours: { type: "integer", default: 24 },
+          is_active: { type: "integer", enum: [0, 1], default: 1 },
+          channels: {
+            type: "object",
+            properties: { email: { type: "boolean" }, webhook: { type: "boolean" }, inApp: { type: "boolean" } },
+          },
+        },
+      },
+      LeadInput: {
+        type: "object",
+        required: ["email"],
+        properties: {
+          email: { type: "string", format: "email" },
+          first_name: { type: "string" },
+          last_name: { type: "string" },
+          company: { type: "string" },
+          title: { type: "string" },
+          phone: { type: "string" },
+          website: { type: "string" },
+          linkedin: { type: "string" },
+          company_linkedin: { type: "string" },
+          city: { type: "string" },
+          state: { type: "string" },
+          address: { type: "string" },
+          location: { type: "string" },
+          custom_variables: { type: "object", additionalProperties: { type: "string" } },
+        },
+      },
+      BlocklistInput: {
+        type: "object",
+        description: "Provide a single { value, type, source? } or a bulk { entries: [...] }.",
+        properties: {
+          value: { type: "string" },
+          type: { type: "string", enum: ["email", "domain"] },
+          source: { type: "string", enum: ["manual", "bounce", "complaint", "unsubscribe"], default: "manual" },
+          entries: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["value", "type"],
+              properties: {
+                value: { type: "string" },
+                type: { type: "string", enum: ["email", "domain"] },
+                source: { type: "string", enum: ["manual", "bounce", "complaint", "unsubscribe"] },
+              },
+            },
+          },
+        },
+      },
+      CampaignCreateInput: {
+        type: "object",
+        required: ["name"],
+        properties: { name: { type: "string" }, group_id: { type: ["string", "null"] } },
+      },
+      LabelInput: {
+        type: "object",
+        required: ["name"],
+        properties: {
+          name: { type: "string" },
+          color: { type: "string", description: "Hex color", default: "#6B7280" },
+          apply_when: { type: "string", description: "Natural-language rule the AI classifier uses to auto-apply" },
+        },
+      },
+      KeysConfig: {
+        type: "object",
+        properties: { keys: { type: "array", items: { type: "string" } } },
+      },
+      FlowCreateInput: {
+        type: "object",
+        required: ["name"],
+        properties: {
+          name: { type: "string" },
+          description: { type: "string" },
+          status: { type: "string", enum: ["draft", "active", "archived"], default: "draft" },
+          trigger_config: { $ref: "#/components/schemas/KeysConfig" },
+          exit_config: { $ref: "#/components/schemas/KeysConfig" },
+        },
+      },
+
+      AttachmentInput: {
+        type: "object",
+        required: ["name", "content"],
+        properties: { name: { type: "string" }, content: { type: "string", description: "base64-encoded" } },
+      },
+      InboxSendInput: {
+        type: "object",
+        required: ["to"],
+        description: "Provide subject+body, or template_id (its rendering fills whichever of subject/body you omit).",
+        properties: {
+          to: { type: "array", items: { type: "string", format: "email" } },
+          cc: { type: "array", items: { type: "string" } },
+          bcc: { type: "array", items: { type: "string" } },
+          subject: { type: "string" },
+          body: { type: "string", description: "message body (HTML by default)" },
+          template_id: { type: "string", description: "Reply template to render (lead vars resolve from the first `to` recipient)" },
+          template_variables: { type: "object", additionalProperties: { type: "string" }, description: "Explicit variable overrides for the template" },
+          bodyType: { type: "string", enum: ["html", "text"], default: "html" },
+          attachments: { type: "array", items: { $ref: "#/components/schemas/AttachmentInput" } },
+        },
+      },
+      InboxReplyInput: {
+        type: "object",
+        required: ["replyToMessageId"],
+        description: "Provide body, or template_id (a template with null subject keeps the thread subject).",
+        properties: {
+          replyToMessageId: { type: "string", description: "id of the message to reply to (from GET conversation)" },
+          body: { type: "string" },
+          template_id: { type: "string", description: "Reply template to render instead of body" },
+          template_variables: { type: "object", additionalProperties: { type: "string" }, description: "Explicit variable overrides for the template" },
+          to: { type: "array", items: { type: "string" }, description: "defaults to the original sender" },
+          cc: { type: "array", items: { type: "string" } },
+          bcc: { type: "array", items: { type: "string" } },
+          subject: { type: "string", description: "defaults to Re: original" },
+          bodyType: { type: "string", enum: ["html", "text"], default: "html" },
+          attachments: { type: "array", items: { $ref: "#/components/schemas/AttachmentInput" } },
+        },
+      },
+      InboxForwardInput: {
+        type: "object",
+        required: ["replyToMessageId", "to"],
+        properties: {
+          replyToMessageId: { type: "string", description: "id of the message to forward" },
+          to: { type: "array", items: { type: "string", format: "email" } },
+          cc: { type: "array", items: { type: "string" } },
+          bcc: { type: "array", items: { type: "string" } },
+          subject: { type: "string" },
+          body: { type: "string", description: "optional note prepended to the forwarded message" },
+          bodyType: { type: "string", enum: ["html", "text"], default: "html" },
+          attachments: { type: "array", items: { $ref: "#/components/schemas/AttachmentInput" } },
+        },
+      },
+      ThreadMetadataInput: {
+        type: "object",
+        properties: {
+          label: { type: "string", description: "category/label to apply to the thread" },
+          starred: { type: "boolean" },
+          archived: { type: "boolean" },
+        },
+      },
+      CampaignStepInput: {
+        type: "object",
+        properties: {
+          delay_days: { type: "integer", description: "wait before this step" },
+          delay_hours: { type: "integer" },
+        },
+      },
+      VariantInput: {
+        type: "object",
+        properties: {
+          label: { type: "string", description: "A/B variant label" },
+          subject: { type: "string" },
+          body_html: { type: "string" },
+          body_text: { type: "string" },
+        },
+      },
+      EmailAccountCreateInput: {
+        type: "object",
+        required: ["email", "password", "smtp_host", "smtp_port"],
+        properties: {
+          email: { type: "string", format: "email" },
+          password: { type: "string" },
+          display_name: { type: "string" },
+          smtp_host: { type: "string" },
+          smtp_port: { type: "integer" },
+          imap_host: { type: "string" },
+          imap_port: { type: "integer" },
+          tags: { type: "array", items: { type: "string" } },
+        },
+      },
+      TagInput: {
+        type: "object",
+        required: ["name"],
+        properties: { name: { type: "string" }, color: { type: "string", description: "hex, default #6B7280" } },
+      },
+      SendTestInput: {
+        type: "object",
+        required: ["to"],
+        properties: {
+          to: { type: "string", format: "email" },
+          step_order: { type: "integer", default: 1 },
+          variant_label: { type: "string", default: "A" },
+          lead_id: { type: "string", description: "render with this lead's data" },
+        },
+      },
+      PushToCampaignInput: {
+        type: "object",
+        required: ["campaign_id"],
+        properties: { campaign_id: { type: "string" } },
+      },
+      LeadMoveInput: {
+        type: "object",
+        required: ["to_list_id"],
+        properties: {
+          to_list_id: { type: "string" },
+          from_list_id: { type: "string", description: "optional list to remove the lead from" },
+        },
+      },
+
+      PermissionsInput: {
+        type: "object",
+        description: "Per-resource scopes",
+        properties: {
+          campaigns: { type: "boolean" }, leads: { type: "boolean" }, accounts: { type: "boolean" },
+          inbox: { type: "boolean" }, team: { type: "boolean" },
+        },
+      },
+      ApiKeyCreateInput: {
+        type: "object",
+        required: ["name"],
+        properties: {
+          name: { type: "string" },
+          permissions: { $ref: "#/components/schemas/PermissionsInput" },
+          expires_at: { type: ["string", "null"], description: "ISO datetime; null = never" },
+        },
+      },
+      ApiKeyUpdateInput: {
+        type: "object",
+        properties: {
+          name: { type: "string" },
+          permissions: { $ref: "#/components/schemas/PermissionsInput" },
+          is_active: { type: "integer", enum: [0, 1] },
+        },
+      },
+      IdsInput: {
+        type: "object",
+        required: ["ids"],
+        properties: { ids: { type: "array", items: { type: "string" } } },
+      },
+      ThreadReadInput: {
+        type: "object",
+        properties: { read: { type: "boolean", description: "false marks unread; defaults to true" } },
+      },
+      UnsubscribeLeadInput: {
+        type: "object",
+        properties: { add_to_blocklist: { type: "boolean", description: "Also add the email to the workspace blocklist (DNC)" } },
+      },
+      ThreadPushToCampaignInput: {
+        type: "object",
+        required: ["campaign_id"],
+        properties: {
+          campaign_id: { type: "string" },
+          create_lead: { type: "boolean", description: "Create a lead record for the counterparty email if none exists" },
+        },
+      },
+      CampaignLeadsMoveInput: {
+        type: "object",
+        required: ["to_campaign_id"],
+        properties: {
+          to_campaign_id: { type: "string" },
+          campaign_lead_ids: { type: "array", items: { type: "string" }, description: "Restrict to these campaign-lead ids" },
+          statuses: { type: "array", items: { type: "string" }, description: "Restrict to leads in these statuses" },
+        },
+      },
+      CampaignLeadsBulkStatusInput: {
+        type: "object",
+        required: ["campaign_lead_ids", "status"],
+        properties: {
+          campaign_lead_ids: { type: "array", items: { type: "string" } },
+          status: { type: "string", enum: ["new", "sending", "contacted", "replied", "interested", "not_interested", "bounced", "completed", "unsubscribed", "skipped"], description: "'completed' stops future emails while keeping history" },
+        },
+      },
+      WorkspaceCreateInput: {
+        type: "object",
+        required: ["name"],
+        properties: {
+          name: { type: "string" },
+          slug: { type: "string", description: "URL-safe unique slug; generated from name if omitted" },
+        },
+      },
+      WorkspaceInviteInput: {
+        type: "object",
+        required: ["email"],
+        properties: {
+          email: { type: "string", format: "email" },
+          role: { type: "string", enum: ["member", "admin"], description: "Membership role (default member)" },
+          role_id: { type: "string", description: "Optional granular RBAC role applied when they sign up" },
+        },
+      },
+      WorkspaceApiKeyInput: {
+        type: "object",
+        required: ["name"],
+        properties: {
+          name: { type: "string" },
+          permissions: { type: "object", additionalProperties: { type: "boolean" }, description: "Explicit scopes ({campaigns:true,...}); empty = inherit the key owner's role" },
+          expires_at: { type: "string", description: "ISO datetime; omit for non-expiring" },
+        },
+      },
+      ReplyTemplateInput: {
+        type: "object",
+        required: ["name", "body"],
+        properties: {
+          name: { type: "string", description: "Unique per workspace" },
+          subject: { type: ["string", "null"], description: "null = keep the thread's subject when used on a reply" },
+          body: { type: "string", description: "Supports {{variables}}, {% if %} conditionals, {spintax|alternates} and sender_* vars" },
+        },
+      },
+      ReplyTemplatePreviewInput: {
+        type: "object",
+        properties: {
+          lead_id: { type: "string", description: "Render with this lead's variables" },
+          account_id: { type: "string", description: "Render sender_* vars from this inbox" },
+          variables: { type: "object", additionalProperties: { type: "string" }, description: "Explicit overrides" },
+        },
+      },
+      IgnorePhraseInput: {
+        type: "object",
+        required: ["phrase"],
+        properties: { phrase: { type: "string", description: "Replies containing this phrase are ignored by the reply classifier" } },
+      },
+      AccountsBulkSettingsInput: {
+        type: "object",
+        required: ["ids"],
+        description: "At least one settings field must be provided alongside ids.",
+        properties: {
+          ids: { type: "array", items: { type: "string" } },
+          daily_limit: { type: "integer" },
+          signature: { type: ["string", "null"], description: "HTML signature; null clears it" },
+          rampup_enabled: { type: "boolean" },
+          rampup_start_daily: { type: "integer" },
+          rampup_increment_daily: { type: "integer" },
+        },
+      },
+      CampaignUpdateInput: {
+        type: "object",
+        description: "All fields optional. Schedule + sending settings are set here (no separate endpoints).",
+        properties: {
+          name: { type: "string" }, group_id: { type: ["string", "null"] },
+          schedule_timezone: { type: "string", description: "IANA tz, or recipient-tz/24-7 mode" },
+          schedule_days: { type: "string", description: "e.g. 'mon,tue,wed,thu,fri'" },
+          schedule_start_time: { type: "string", description: "HH:MM" },
+          schedule_end_time: { type: "string", description: "HH:MM" },
+          schedule_start_date: { type: "string" }, schedule_end_date: { type: "string" },
+          daily_limit: { type: "integer", description: "campaign-wide daily cap" },
+          min_delay_seconds: { type: "integer" }, max_delay_seconds: { type: "integer" },
+          track_opens: { type: "integer", enum: [0, 1] },
+          stop_on_reply: { type: "integer", enum: [0, 1] },
+          stop_on_auto_reply: { type: "integer", enum: [0, 1] },
+          skip_dnc: { type: "integer", enum: [0, 1] },
+          send_mode: { type: "string", description: "fixed_tz | recipient_tz | 24_7" },
+          skip_holidays: { type: "integer", enum: [0, 1] },
+          priority: { type: "string" }, followup_priority: { type: "string" },
+          esp_matching: { type: "integer", enum: [0, 1] },
+          seg_handling: { type: "string", description: "skip-all | selective | off" },
+          seg_skip_providers: { type: "string", description: "comma-separated SEG providers" },
+          bounce_monitoring: { type: "integer", enum: [0, 1] },
+          bounce_threshold: { type: "number" },
+          inbox_failure_monitoring: { type: "integer", enum: [0, 1] },
+          inbox_failure_threshold: { type: "number" },
+          ab_optimization: { type: "integer", enum: [0, 1], description: "Thompson-sampling A/B" },
+          agent_id: { type: ["string", "null"], description: "attach an AI reply agent" },
+          on_reply_enabled: { type: "integer", enum: [0, 1] },
+          on_reply_triggers: { type: "string", description: "comma-separated status/label triggers" },
+        },
+      },
+      CampaignStatusInput: {
+        type: "object",
+        required: ["status"],
+        properties: { status: { type: "string", enum: ["draft", "active", "paused", "completed", "archived"], description: "'archived' soft-archives (pauses if active); setting any other status on an archived campaign restores it" } },
+      },
+      PreviewInput: {
+        type: "object",
+        properties: {
+          step_order: { type: "integer" }, variant_label: { type: "string" },
+          lead_id: { type: "string", description: "render with this lead's data" },
+          subject: { type: "string" }, body: { type: "string" },
+        },
+      },
+      AccountAssignInput: {
+        type: "object",
+        required: ["account_id"],
+        properties: { account_id: { type: "string" } },
+      },
+      TagAssignInput: {
+        type: "object",
+        required: ["tag_id"],
+        properties: { tag_id: { type: "string" } },
+      },
+      CampaignAddLeadsInput: {
+        type: "object",
+        required: ["list_id"],
+        properties: { list_id: { type: "string", description: "add all leads from this list" } },
+      },
+      CampaignLeadStatusInput: {
+        type: "object",
+        required: ["status"],
+        properties: {
+          status: {
+            type: "string",
+            enum: ["new", "sending", "contacted", "replied", "interested", "not_interested", "bounced", "completed", "unsubscribed", "skipped"],
+          },
+        },
+      },
+      GroupInput: {
+        type: "object",
+        required: ["name"],
+        properties: { name: { type: "string" }, description: { type: "string" }, parent_group_id: { type: ["string", "null"] } },
+      },
+      GroupUpdateInput: {
+        type: "object",
+        properties: {
+          name: { type: "string" }, description: { type: "string" },
+          sort_order: { type: "integer" }, parent_group_id: { type: ["string", "null"] },
+        },
+      },
+      LeadListCreateInput: {
+        type: "object",
+        required: ["name"],
+        properties: { name: { type: "string" }, description: { type: "string" }, tag: { type: "string" } },
+      },
+      LeadListUpdateInput: {
+        type: "object",
+        properties: { name: { type: "string" }, description: { type: "string" }, group_id: { type: ["string", "null"] } },
+      },
+      CsvPreviewInput: {
+        type: "object",
+        required: ["csv_text"],
+        properties: { csv_text: { type: "string" } },
+      },
+      CsvImportInput: {
+        type: "object",
+        required: ["csv_text", "mapping"],
+        properties: {
+          csv_text: { type: "string" },
+          mapping: { type: "object", additionalProperties: { type: "string" }, description: "csv column -> lead field (or custom:fieldname); must map 'email'" },
+        },
+      },
+      BulkListMoveInput: {
+        type: "object",
+        required: ["ids"],
+        properties: { ids: { type: "array", items: { type: "string" } }, group_id: { type: ["string", "null"] } },
+      },
+      LeadsBulkInput: {
+        type: "object",
+        required: ["leads"],
+        properties: { leads: { type: "array", items: { $ref: "#/components/schemas/LeadInput" } } },
+      },
+      LeadTagAddInput: {
+        type: "object",
+        required: ["tag_id"],
+        properties: { tag_id: { type: "string" } },
+      },
+      EmailAccountUpdateInput: {
+        type: "object",
+        properties: {
+          daily_limit: { type: "integer" }, display_name: { type: "string" },
+          signature: { type: ["string", "null"], description: "HTML signature; null clears it" },
+          rampup_enabled: { type: "integer", enum: [0, 1] },
+          rampup_start_daily: { type: "integer" }, rampup_increment_daily: { type: "integer" },
+        },
+      },
+      EmailAccountsBulkInput: {
+        type: "object",
+        required: ["accounts"],
+        properties: { accounts: { type: "array", items: { $ref: "#/components/schemas/EmailAccountCreateInput" } } },
+      },
+      BulkDailyLimitInput: {
+        type: "object",
+        required: ["ids", "daily_limit"],
+        properties: { ids: { type: "array", items: { type: "string" } }, daily_limit: { type: "integer" } },
+      },
+      TagAccountsInput: {
+        type: "object",
+        required: ["accountIds"],
+        properties: { accountIds: { type: "array", items: { type: "string" } } },
+      },
+      RoleCreateInput: {
+        type: "object",
+        required: ["name"],
+        properties: { name: { type: "string" }, permissions: { $ref: "#/components/schemas/PermissionsInput" } },
+      },
+      RoleAssignInput: {
+        type: "object",
+        required: ["userId", "roleId"],
+        properties: { userId: { type: "string" }, roleId: { type: "string" } },
+      },
+      RoleUpdateInput: {
+        type: "object",
+        properties: { name: { type: "string" }, permissions: { $ref: "#/components/schemas/PermissionsInput" } },
+      },
+      FlowAttachInput: {
+        type: "object",
+        required: ["flow_id"],
+        properties: { flow_id: { type: "string" } },
+      },
+      FlowGraphInput: {
+        type: "object",
+        required: ["nodes", "edges"],
+        properties: {
+          flow: { type: "object", description: "optional flow meta to update", additionalProperties: true },
+          nodes: { type: "array", items: { type: "object", additionalProperties: true }, description: "{id,type,config,pos_x,pos_y}" },
+          edges: { type: "array", items: { type: "object", additionalProperties: true }, description: "{id,source_node_id,target_node_id,source_handle,label}" },
+        },
+      },
+
+      WarmupSettingsInput: {
+        type: "object",
+        properties: {
+          tagEnabled: { type: "boolean", description: "Append the filter tag to warmup mail arriving at this workspace's inboxes" },
+          tagInOutgoing: { type: "boolean", description: "Also tag warmup mail this workspace sends" },
+        },
+      },
+      WarmupAccountPatchInput: {
+        type: "object",
+        properties: {
+          warmup_enabled: { type: "boolean" },
+          warmup_profile_id: { type: ["string", "null"], description: "Copy profile to warm with; null/empty clears (generic conversation)" },
+          warmup_daily_limit: { type: "integer" },
+          warmup_rampup_enabled: { type: "boolean" },
+          warmup_rampup_start: { type: "integer" },
+          warmup_rampup_increment: { type: "integer" },
+          warmup_reply_rate: { type: "number", description: "Fraction of received warmup mail this inbox replies to (0..1)" },
+        },
+      },
+      WarmupBulkInput: {
+        type: "object",
+        required: ["accountIds"],
+        properties: {
+          accountIds: { type: "array", items: { type: "string" } },
+          patch: { $ref: "#/components/schemas/WarmupAccountPatchInput" },
+        },
+      },
+      WarmupProfileInput: {
+        type: "object",
+        description: "POST requires name + offer_description (min ~2 sentences); PATCH accepts any subset.",
+        properties: {
+          name: { type: "string", description: "Unique per workspace" },
+          offer_description: { type: "string", description: "What the offer is, in a couple of sentences (min 20 chars)" },
+          example_copy: { type: "string", description: "Optional real cold-email copy to mimic" },
+          offer_ratio: { type: "number", description: "Share of warmup sends that pitch the offer" },
+        },
+      },
+      AiReplyRegenerateInput: {
+        type: "object",
+        required: ["accountId", "conversationId"],
+        properties: {
+          accountId: { type: "string", description: "Inbox the thread lives in" },
+          conversationId: { type: "string", description: "Thread id" },
+          tone: { type: ["string", "null"], enum: ["professional", "friendly", "casual", "formal", null], description: "Optional tone override; null/omit = agent default" },
+        },
+      },
+      AiReplyDraftSendInput: {
+        type: "object",
+        properties: {
+          subject: { type: "string", description: "Optional edited subject" },
+          body: { type: "string", description: "Optional edited body" },
+        },
+      },
+      TaskCompleteInput: {
+        type: "object",
+        properties: {
+          disposition: { type: ["string", "null"], description: "Call outcome to record; also mirrored onto the linked call recording" },
+        },
+      },
+      IntegrationUpsertInput: {
+        type: "object",
+        description: "Per-field merge: undefined keeps the stored value, null/empty string clears it.",
+        properties: {
+          public: { type: "object", additionalProperties: true, description: "Non-secret config fields for the provider" },
+          secrets: { type: "object", additionalProperties: { type: ["string", "null"] }, description: "Secret fields (stored encrypted; never returned in plaintext)" },
+          is_enabled: { type: "boolean" },
+        },
+      },
+      BlocklistSettingsInput: {
+        type: "object",
+        properties: {
+          dncOnNotInterested: { type: "boolean", description: "Auto-add a lead to the blocklist when marked not interested" },
+          dncBlockDomain: { type: "boolean", description: "Block the whole domain (not just the email) when auto-DNCing" },
+        },
+      },
+      BlocklistImportInput: {
+        type: "object",
+        required: ["entries"],
+        properties: {
+          entries: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["value", "type"],
+              properties: {
+                value: { type: "string" },
+                type: { type: "string", enum: ["email", "domain"] },
+              },
+            },
+          },
+        },
+      },
+      AssignPendingRoleInput: {
+        type: "object",
+        required: ["email", "roleId"],
+        properties: {
+          email: { type: "string", format: "email", description: "Invited email the role applies to on signup" },
+          roleId: { type: "string" },
+        },
+      },
+      RevokeUserInput: {
+        type: "object",
+        required: ["userId"],
+        properties: { userId: { type: "string" } },
+      },
+      EnhancePromptInput: {
+        type: "object",
+        required: ["prompt"],
+        properties: {
+          prompt: { type: "string", description: "Rough agent instructions to rewrite" },
+          companyName: { type: "string" },
+          companyDomain: { type: "string" },
+          provider: { type: "string", enum: ["anthropic", "openai"] },
+          model: { type: "string", description: "Provider model id" },
+        },
+      },
+      TestCalcomInput: {
+        type: "object",
+        required: ["eventTypeId"],
+        properties: { eventTypeId: { type: "string", description: "Cal.com event-type id to diagnose" } },
+      },
+      SpintaxGenerateInput: {
+        type: "object",
+        required: ["body"],
+        properties: {
+          subject: { type: "string", description: "Subject line to also weave spintax into" },
+          body: { type: "string", description: "Email body copy to weave spintax variations into" },
+          creativity: { type: "string", enum: ["subtle", "balanced", "creative"], default: "balanced" },
+          instructions: { type: "string", description: "Optional extra guidance for the generator" },
+        },
+      },
+      CampaignLabelInput: {
+        type: "object",
+        required: ["name"],
+        properties: {
+          name: { type: "string" },
+          color: { type: "string", description: "Label color (hex); defaults when omitted" },
+        },
+      },
+      MicrosoftBulkInput: {
+        type: "object",
+        required: ["accounts"],
+        properties: {
+          accounts: {
+            type: "array",
+            description: "Microsoft inboxes to import; credentials are forwarded to the uploader, never persisted",
+            items: {
+              type: "object",
+              required: ["email", "password"],
+              properties: {
+                email: { type: "string", format: "email" },
+                password: { type: "string" },
+                name: { type: "string", description: "Display name" },
+                otp_secret: { type: "string", description: "TOTP secret when the inbox has 2FA" },
+              },
+            },
+          },
+          fileName: { type: "string", description: "Source file name shown on the Pending Uploads page" },
+        },
+      },
+      RecordingDispositionInput: {
+        type: "object",
+        properties: {
+          disposition: {
+            type: ["string", "null"],
+            description: "Manual call outcome (e.g. booked_meeting, declined_meeting); null clears it",
+          },
+        },
+      },
+      PhoneNumberRentInput: {
+        type: "object",
+        required: ["area_code"],
+        properties: {
+          area_code: { type: "string", description: "3-digit US area code to rent a local number in" },
+        },
+      },
+      LinkedInConnectLinkInput: {
+        type: "object",
+        properties: {
+          reconnectAccountId: {
+            type: "string",
+            description: "Existing LinkedIn account id to reconnect in place (omit to connect a new account)",
+          },
+        },
+      },
+      LinkedInSendInput: {
+        type: "object",
+        required: ["body"],
+        properties: {
+          body: { type: "string", description: "Message text (HTML is stripped to plain text — LinkedIn DMs are plain text)" },
+          to: { type: "string", description: "Target member's stable LinkedIn provider id (takes precedence over conversationId)" },
+          conversationId: { type: "string", description: "Thread key = the member's provider id (NOT a Unipile chat id)" },
+        },
+      },
+
+      // ---- Outbound webhook payload schemas (what WE POST to a subscriber's url) ----
+      WebhookLead: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          email: { type: "string" },
+          first_name: { type: "string" },
+          last_name: { type: "string" },
+          company: { type: "string" },
+        },
+      },
+      WebhookCampaign: {
+        type: "object",
+        properties: { id: { type: "string" }, name: { type: "string" } },
+      },
+      WebhookSend: {
+        type: "object",
+        nullable: true,
+        properties: {
+          id: { type: "string", description: "campaign_sends id of the outbound message" },
+          subject: { type: "string" },
+          sent_at: { type: "string" },
+          account_id: { type: "string", description: "inbox that sent it" },
+        },
+      },
+      WebhookThread: {
+        type: "object",
+        description:
+          "Identifiers to act on the reply via the API: GET /api/v1/inbox/{account_id}/conversation/{conversation_id} " +
+          "to read it and obtain a message id, then POST /api/v1/inbox/{account_id}/reply { replyToMessageId, body }.",
+        properties: {
+          account_id: { type: ["string", "null"], description: "inbox the reply landed in (use as the reply path param)" },
+          conversation_id: { type: ["string", "null"], description: "thread id; null on the first reply before the thread link is written" },
+        },
+      },
+      WebhookReply: {
+        type: ["object", "null"],
+        description: "Inline snippet of the lead's latest inbound message (for drafting without a fetch).",
+        properties: {
+          from: { type: "string", description: "reply from-address" },
+          subject: { type: "string" },
+          snippet: { type: "string", description: "preview text; fetch GET conversation for the full body" },
+          received_at: { type: "string" },
+        },
+      },
+      WebhookAlert: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          rule_id: { type: "string" },
+          rule_name: { type: "string" },
+          metric: { type: "string", enum: ["bounce_rate", "reply_rate", "positive_rate", "sends"] },
+          comparator: { type: "string", enum: ["above", "below", "drops_by_pct"] },
+          scope: { type: "string", enum: ["all", "tag", "domain", "inbox"] },
+          scope_value: { type: ["string", "null"], description: "the specific domain/inbox/tag that tripped the rule" },
+          threshold: { type: "number" },
+          observed_value: { type: "number" },
+          prev_value: { type: ["number", "null"], description: "previous-window value (for drops_by_pct)" },
+          sends: { type: "integer", description: "send volume in the window" },
+          message: { type: "string" },
+          created_at: { type: "string" },
+        },
+      },
+    },
+  },
+  security: [{ ApiKeyHeader: [] }, { BearerKey: [] }],
+  paths: buildPaths(),
+  webhooks: buildWebhooks(),
+};
