@@ -1613,6 +1613,24 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "description": "Unassigns the inbox from the campaign (204). Note a tag-synced assignment can come back on the next tag sync — remove the account from the tag (or the tag from the campaign) instead for a lasting removal."
   },
   {
+    "method": "delete",
+    "path": "/campaigns/{id}/accounts/by-tag/{tagId}",
+    "tag": "Campaigns",
+    "summary": "Unassign a tag's inboxes",
+    "scope": "campaigns",
+    "description": "Removes the campaign's persistent tag link AND every assignment for accounts currently carrying the tag, in one transaction. The lasting inverse of POST /campaigns/{id}/accounts/by-tag — after this, tag syncs no longer re-add the inboxes. Returns {removed}."
+  },
+  {
+    "method": "post",
+    "path": "/campaigns/{id}/accounts/bulk-remove",
+    "tag": "Campaigns",
+    "summary": "Bulk-remove inboxes",
+    "scope": "campaigns",
+    "description": "Unassigns many inboxes in one transaction (body account_ids: string[]). Unknown ids no-op. Tag-synced assignments removed this way can come back on the next tag sync — use the by-tag delete for a lasting removal. Returns {removed}.",
+    "body": true,
+    "reqSchema": "AccountBulkRemoveInput"
+  },
+  {
     "method": "get",
     "path": "/campaigns/{id}/leads",
     "tag": "Campaigns",
@@ -4199,6 +4217,21 @@ export const openapiSpec = { components: { schemas: {
     "properties": {
       "tag_id": {
         "type": "string"
+      }
+    }
+  },
+  "AccountBulkRemoveInput": {
+    "type": "object",
+    "required": [
+      "account_ids"
+    ],
+    "properties": {
+      "account_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "account ids to unassign"
       }
     }
   },
