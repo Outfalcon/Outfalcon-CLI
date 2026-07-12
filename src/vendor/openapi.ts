@@ -2051,7 +2051,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "query": [
       {
         "name": "category",
-        "description": "Filter view. 'all' = campaign-linked & non-archived (excludes uncampaigned spam — use this for the primary inbox); also: unread, starred, archived, uncampaigned, interested, not_interested, meeting_booked, ooo, closed, irrelevant_marketing, or any custom label name. Omit for the raw feed (includes uncampaigned)."
+        "description": "Filter view. 'all' = campaign-linked & non-archived (excludes uncampaigned spam — use this for the primary inbox); also: unread, starred, archived, uncampaigned, interested, not_interested, meeting_booked, ooo, closed, irrelevant_marketing, bounce, or any custom label name. Omit for the raw feed (includes uncampaigned)."
       },
       {
         "name": "search",
@@ -2088,7 +2088,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "query": [
       {
         "name": "category",
-        "description": "Filter view. 'all' = campaign-linked & non-archived (excludes uncampaigned spam — use this for the primary inbox); also: unread, starred, archived, uncampaigned, interested, not_interested, meeting_booked, ooo, closed, irrelevant_marketing, or any custom label name. Omit for the raw feed (includes uncampaigned)."
+        "description": "Filter view. 'all' = campaign-linked & non-archived (excludes uncampaigned spam — use this for the primary inbox); also: unread, starred, archived, uncampaigned, interested, not_interested, meeting_booked, ooo, closed, irrelevant_marketing, bounce, or any custom label name. Omit for the raw feed (includes uncampaigned)."
       },
       {
         "name": "search",
@@ -2841,6 +2841,77 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "summary": "Poll an async job",
     "scope": "none",
     "description": "id is the job_id from a 202 response. Returns {id, type, status (pending|running|completed|failed), progress, result, error}; result holds the operation's payload once status is 'completed'. Jobs expire and 404 after a retention window."
+  },
+  {
+    "method": "get",
+    "path": "/bounces",
+    "tag": "Bounces",
+    "summary": "List recorded bounces with parsed reasons",
+    "scope": "campaigns",
+    "description": "Every recorded bounce with its parsed reason: smtp_code, enhanced_code (RFC 3463, e.g. 5.1.1), bounce_type (hard/soft/block/unknown), a stable category slug (invalid_recipient, mailbox_disabled, mailbox_full, spam_block, auth_policy, dns_failure, message_too_large, temporary_failure, other), a simplified human-readable reason, the remote server's diagnostic snippet, and ai_summary (one-liner, present only when rules couldn't classify and a workspace AI key exists). Rows link back to campaign_id/lead_id/campaign_send_id and the DSN's inbox thread (account_id + conversation_id). Newest first.",
+    "query": [
+      {
+        "name": "campaign_id"
+      },
+      {
+        "name": "account_id",
+        "description": "The sending inbox the bounce returned to"
+      },
+      {
+        "name": "category",
+        "description": "One of the category slugs above"
+      },
+      {
+        "name": "type",
+        "description": "hard | soft | block | unknown",
+        "enum": [
+          "hard",
+          "soft",
+          "block",
+          "unknown"
+        ]
+      },
+      {
+        "name": "search",
+        "description": "Substring match on the failed recipient address"
+      },
+      {
+        "name": "since",
+        "description": "Lower bound on created_at, as YYYY-MM-DD or 'YYYY-MM-DD HH:MM:SS' (string compare — don't send ISO 'T' timestamps)"
+      },
+      {
+        "name": "until",
+        "description": "Upper bound on created_at, same format as since"
+      },
+      {
+        "name": "page"
+      },
+      {
+        "name": "limit",
+        "description": "max 200"
+      }
+    ]
+  },
+  {
+    "method": "get",
+    "path": "/bounces/summary",
+    "tag": "Bounces",
+    "summary": "Bounce rollup by category, type and recipient domain",
+    "scope": "campaigns",
+    "description": "Aggregate view for health dashboards: total, by_category (with the simplified reason), by_type (hard/soft/block), and top_recipient_domains — the fastest way to tell a bad-list problem (invalid_recipient concentrated) from a reputation problem (spam_block across domains).",
+    "query": [
+      {
+        "name": "since",
+        "description": "Lower bound on created_at, as YYYY-MM-DD or 'YYYY-MM-DD HH:MM:SS' (string compare — don't send ISO 'T' timestamps)"
+      },
+      {
+        "name": "until",
+        "description": "Upper bound on created_at, same format as since"
+      },
+      {
+        "name": "campaign_id"
+      }
+    ]
   }
 ] as unknown as RouteDef[];
 
@@ -5080,6 +5151,56 @@ export const openapiSpec = { components: { schemas: {
       },
       "received_at": {
         "type": "string"
+      }
+    }
+  },
+  "WebhookBounce": {
+    "type": [
+      "object",
+      "null"
+    ],
+    "description": "Parsed bounce reason (bounce-parser). Null when the DSN body wasn't available to the recorder.",
+    "properties": {
+      "type": {
+        "type": "string",
+        "enum": [
+          "hard",
+          "soft",
+          "block",
+          "unknown"
+        ]
+      },
+      "category": {
+        "type": "string",
+        "enum": [
+          "invalid_recipient",
+          "mailbox_disabled",
+          "mailbox_full",
+          "spam_block",
+          "auth_policy",
+          "dns_failure",
+          "message_too_large",
+          "temporary_failure",
+          "other"
+        ]
+      },
+      "reason": {
+        "type": "string",
+        "description": "simplified human-readable one-liner"
+      },
+      "smtp_code": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "SMTP reply code, e.g. 550"
+      },
+      "enhanced_code": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "RFC 3463 enhanced status, e.g. 5.1.1"
       }
     }
   },
