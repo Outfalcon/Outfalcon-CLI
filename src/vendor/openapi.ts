@@ -2912,6 +2912,53 @@ export const ROUTE_REGISTRY: RouteDef[] = [
         "name": "campaign_id"
       }
     ]
+  },
+  {
+    "method": "get",
+    "path": "/activities",
+    "tag": "Activities",
+    "summary": "List the workspace activity log",
+    "scope": "team",
+    "description": "Audit trail of workspace actions over the last 30 days (older rows are pruned): campaign/lead/inbox/team/settings changes from the UI and API, plus system events (auto-pauses, fired alerts). Each row: type, action slug, human message, actor (null for system rows), source ('ui'|'api'|'system'), api_key_id when source is 'api', entity refs, created_at. Newest first.",
+    "query": [
+      {
+        "name": "type",
+        "description": "Filter by activity type (e.g. campaign, lead, inbox, team, alert, system)"
+      },
+      {
+        "name": "actor_user_id",
+        "description": "Filter by the acting member's user id, or 'system' for background/engine rows"
+      },
+      {
+        "name": "from_api",
+        "description": "1/true = only API-key actions; 0/false = only UI + system",
+        "enum": [
+          "1",
+          "true",
+          "0",
+          "false"
+        ]
+      },
+      {
+        "name": "q",
+        "description": "Substring match on the message"
+      },
+      {
+        "name": "start",
+        "description": "Inclusive created_at lower bound (YYYY-MM-DD or full datetime)"
+      },
+      {
+        "name": "end",
+        "description": "Inclusive created_at upper bound"
+      },
+      {
+        "name": "top",
+        "description": "Page size, max 200 (default 50)"
+      },
+      {
+        "name": "skip"
+      }
+    ]
   }
 ] as unknown as RouteDef[];
 
@@ -4167,11 +4214,41 @@ export const openapiSpec = { components: { schemas: {
         "type": "string"
       },
       "esp_matching": {
-        "type": "integer",
+        "type": "string",
         "enum": [
-          0,
-          1
-        ]
+          "disabled",
+          "auto",
+          "custom"
+        ],
+        "description": "auto = prefer same-provider inboxes; custom = per-recipient-ESP rules in esp_rules"
+      },
+      "esp_rules": {
+        "type": "object",
+        "description": "esp_matching='custom' rules, keyed by recipient ESP (gmail|outlook|yahoo|apple|zoho|other|unknown). Each value is {\"action\":\"skip\"} (never email this provider) or {\"action\":\"route\",\"to\":\"<sender esp>\"} (send only from inboxes of that provider). Absent key = any inbox.",
+        "additionalProperties": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "skip",
+                "route"
+              ]
+            },
+            "to": {
+              "type": "string",
+              "enum": [
+                "gmail",
+                "outlook",
+                "yahoo",
+                "apple",
+                "zoho",
+                "other",
+                "unknown"
+              ]
+            }
+          }
+        }
       },
       "seg_handling": {
         "type": "string",
