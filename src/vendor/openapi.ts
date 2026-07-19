@@ -4141,8 +4141,23 @@ export const openapiSpec = { components: { schemas: {
         "description": "IANA tz, or recipient-tz/24-7 mode"
       },
       "schedule_days": {
-        "type": "string",
-        "description": "e.g. 'mon,tue,wed,thu,fri'"
+        "type": [
+          "array",
+          "string"
+        ],
+        "items": {
+          "type": "string",
+          "enum": [
+            "sun",
+            "mon",
+            "tue",
+            "wed",
+            "thu",
+            "fri",
+            "sat"
+          ]
+        },
+        "description": "Allowed sending days — a JSON array, e.g. [\"mon\",\"tue\",\"wed\",\"thu\",\"fri\"] (a comma-separated string like 'mon,tue,wed' is also accepted and normalized)"
       },
       "schedule_start_time": {
         "type": "string",
