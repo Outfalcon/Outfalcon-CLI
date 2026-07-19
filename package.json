@@ -1,6 +1,6 @@
 {
   "name": "@outfalcon/falcon",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Falcon — the CLI for the GTM Sequencer API. One command per API operation, generated from the live route registry.",
   "bin": {
     "falcon": "dist/index.js"
