@@ -873,6 +873,91 @@ export const ROUTE_REGISTRY: RouteDef[] = [
   },
   {
     "method": "get",
+    "path": "/leads",
+    "tag": "Leads",
+    "summary": "List every unique lead in the workspace",
+    "scope": "leads",
+    "description": "Canonical workspace lead directory. Each lead appears once even when it belongs to multiple lists or campaigns. Page-paginated and accepts the same grid filters as a lead list.",
+    "query": [
+      {
+        "name": "page",
+        "description": "Page number (default 1)"
+      },
+      {
+        "name": "limit",
+        "description": "Rows per page (default 50, max 200)"
+      },
+      {
+        "name": "q",
+        "description": "Free-text across email/name/company/title"
+      },
+      {
+        "name": "source",
+        "description": "Exact source"
+      },
+      {
+        "name": "email_type",
+        "description": "personal, business, or unknown"
+      },
+      {
+        "name": "email_status",
+        "description": "valid, invalid, risky, catch_all, or unknown"
+      },
+      {
+        "name": "esp",
+        "description": "gmail, outlook, yahoo, apple, zoho, other, or unknown"
+      },
+      {
+        "name": "seg",
+        "description": "protected or none",
+        "enum": [
+          "protected",
+          "none"
+        ]
+      },
+      {
+        "name": "has_company",
+        "description": "Set to true/1 to require a company"
+      },
+      {
+        "name": "has_phone",
+        "description": "Set to true/1 to require a phone"
+      },
+      {
+        "name": "sort",
+        "description": "Lead field to sort by"
+      },
+      {
+        "name": "dir",
+        "description": "Sort direction",
+        "enum": [
+          "asc",
+          "desc"
+        ]
+      }
+    ]
+  },
+  {
+    "method": "post",
+    "path": "/leads",
+    "tag": "Leads",
+    "summary": "Create a lead",
+    "scope": "leads",
+    "description": "Never fails on duplicates: if the email already exists in the workspace this behaves as an update (non-empty incoming fields win, existing values are kept otherwise) and returns the existing lead. The lead's timezone is auto-resolved from city/state/location for recipient-timezone sending. Returns 201. Created leads belong to no list — add with POST /leads/{id}/move.",
+    "body": true,
+    "reqSchema": "LeadInput",
+    "idempotent": true
+  },
+  {
+    "method": "get",
+    "path": "/leads/facets",
+    "tag": "Leads",
+    "summary": "Workspace lead filter facets",
+    "scope": "leads",
+    "description": "Returns the sources and custom-variable keys used across the workspace."
+  },
+  {
+    "method": "get",
     "path": "/leads/lists",
     "tag": "Leads",
     "summary": "List lead lists",
@@ -1129,17 +1214,6 @@ export const ROUTE_REGISTRY: RouteDef[] = [
         "description": "Accepted values for var_key; omit for just 'present'"
       }
     ]
-  },
-  {
-    "method": "post",
-    "path": "/leads",
-    "tag": "Leads",
-    "summary": "Create a lead",
-    "scope": "leads",
-    "description": "Never fails on duplicates: if the email already exists in the workspace this behaves as an update (non-empty incoming fields win, existing values are kept otherwise) and returns the existing lead. The lead's timezone is auto-resolved from city/state/location for recipient-timezone sending. Returns 201. Created leads belong to no list — add with POST /leads/{id}/move.",
-    "body": true,
-    "reqSchema": "LeadInput",
-    "idempotent": true
   },
   {
     "method": "post",
