@@ -1032,6 +1032,16 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "cursor": true
   },
   {
+    "method": "post",
+    "path": "/leads/lists/{id}/leads",
+    "tag": "Leads",
+    "summary": "Add specific leads (by id) to a list",
+    "scope": "leads",
+    "description": "Adds up to 10,000 lead ids to the list; leads outside the workspace and existing members are silently skipped. Returns {added} (newly-added count). 404 for a list outside the workspace.",
+    "body": true,
+    "reqSchema": "LeadIdsAddInput"
+  },
+  {
     "method": "delete",
     "path": "/leads/lists/{id}/leads",
     "tag": "Leads",
@@ -1113,6 +1123,16 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "description": "Sets group_id on every listed lead list (null or an unknown/foreign group ungroups them). Returns {updated}.",
     "body": true,
     "reqSchema": "BulkListMoveInput"
+  },
+  {
+    "method": "post",
+    "path": "/leads/bulk-delete",
+    "tag": "Leads",
+    "summary": "Delete specific leads (by id) from the workspace",
+    "scope": "leads",
+    "description": "Hard-deletes up to 10,000 lead records; list memberships and campaign assignments cascade away, and affected lists' total_leads are recounted. Ids outside the workspace are silently skipped. Returns {deleted}. For filter-based removal from ONE list use DELETE /leads/lists/{id}/leads instead.",
+    "body": true,
+    "reqSchema": "BulkLeadDeleteInput"
   },
   {
     "method": "get",
@@ -4628,6 +4648,36 @@ export const openapiSpec = { components: { schemas: {
           "string",
           "null"
         ]
+      }
+    }
+  },
+  "LeadIdsAddInput": {
+    "type": "object",
+    "required": [
+      "lead_ids"
+    ],
+    "properties": {
+      "lead_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Lead ids to add (max 10,000)"
+      }
+    }
+  },
+  "BulkLeadDeleteInput": {
+    "type": "object",
+    "required": [
+      "ids"
+    ],
+    "properties": {
+      "ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Lead ids to delete (max 10,000)"
       }
     }
   },
