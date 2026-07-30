@@ -2938,6 +2938,52 @@ export const ROUTE_REGISTRY: RouteDef[] = [
   },
   {
     "method": "get",
+    "path": "/lead-views",
+    "tag": "Lead Views",
+    "summary": "List saved lead-grid views",
+    "scope": "leads",
+    "description": "Workspace-shared saved views for the lead grid. Each view bundles grid state (filters, operator conditions, sort levels, visible columns/order/widths) as an opaque JSON config. Filter with ?scope=all|list|campaign — the grid surface the view belongs to."
+  },
+  {
+    "method": "post",
+    "path": "/lead-views",
+    "tag": "Lead Views",
+    "summary": "Create a saved lead-grid view",
+    "scope": "leads",
+    "description": "Creates a view visible to the whole workspace. scope is the grid surface it appears on: 'all' (workspace lead directory), 'list' (lead-list detail) or 'campaign' (campaign leads panel). config is an arbitrary JSON object (max 16KB) the UI interprets.",
+    "body": true,
+    "reqSchema": "LeadViewInput"
+  },
+  {
+    "method": "patch",
+    "path": "/lead-views/{id}",
+    "tag": "Lead Views",
+    "summary": "Update a saved lead-grid view",
+    "scope": "leads",
+    "description": "Updates name, emoji and/or config. Scope is immutable — create a new view instead.",
+    "body": true,
+    "reqSchema": "LeadViewUpdateInput"
+  },
+  {
+    "method": "delete",
+    "path": "/lead-views/{id}",
+    "tag": "Lead Views",
+    "summary": "Delete a saved lead-grid view",
+    "scope": "leads",
+    "description": "Deletes the view for everyone in the workspace (204)."
+  },
+  {
+    "method": "put",
+    "path": "/lead-views/reorder",
+    "tag": "Lead Views",
+    "summary": "Reorder saved lead-grid views",
+    "scope": "leads",
+    "description": "Body ids = view ids in the desired display order; views not listed keep their relative position after the listed ones. Returns the full reordered set.",
+    "body": true,
+    "reqSchema": "LeadViewReorderInput"
+  },
+  {
+    "method": "get",
     "path": "/bounces",
     "tag": "Bounces",
     "summary": "List recorded bounces with parsed reasons",
@@ -4524,6 +4570,66 @@ export const openapiSpec = { components: { schemas: {
           "unsubscribed",
           "skipped"
         ]
+      }
+    }
+  },
+  "LeadViewInput": {
+    "type": "object",
+    "required": [
+      "name",
+      "scope"
+    ],
+    "properties": {
+      "name": {
+        "type": "string",
+        "maxLength": 80
+      },
+      "scope": {
+        "type": "string",
+        "enum": [
+          "all",
+          "list",
+          "campaign"
+        ]
+      },
+      "emoji": {
+        "type": "string",
+        "maxLength": 8
+      },
+      "config": {
+        "type": "object",
+        "description": "Opaque grid state (filters, sort, columns…), max 16KB"
+      }
+    }
+  },
+  "LeadViewUpdateInput": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "maxLength": 80
+      },
+      "emoji": {
+        "type": "string",
+        "maxLength": 8
+      },
+      "config": {
+        "type": "object",
+        "description": "Opaque grid state (filters, sort, columns…), max 16KB"
+      }
+    }
+  },
+  "LeadViewReorderInput": {
+    "type": "object",
+    "required": [
+      "ids"
+    ],
+    "properties": {
+      "ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
       }
     }
   },
