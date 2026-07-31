@@ -548,9 +548,28 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Email Accounts",
     "summary": "Bulk-import Microsoft inboxes via the external uploader, one batch per email domain (503 when the uploader is not configured on this server)",
     "scope": "accounts",
-    "description": "Each account needs email + password; credentials are forwarded to the uploader, never stored. Accounts are grouped by email domain — one batch/browser session per domain, all sharing one workspace connect link. Returns {submitted, batches, failedDomains}; track progress via GET /email-accounts/uploads (502 if no domain could be submitted).",
+    "description": "Each account needs email + password; credentials are forwarded to the uploader and kept encrypted for up to 7 days solely to power retry-failures (cleared the moment an inbox connects). Accounts are grouped by email domain — one batch/browser session per domain, all sharing one workspace connect link. Returns {submitted, batches, failedDomains}; track progress via GET /email-accounts/uploads (502 if no domain could be submitted).",
     "body": true,
     "reqSchema": "MicrosoftBulkInput",
+    "idempotent": true
+  },
+  {
+    "method": "post",
+    "path": "/email-accounts/uploads/{batchId}/retry-failures",
+    "tag": "Email Accounts",
+    "summary": "Resubmit a bulk-upload batch's failed (and stale in-flight) inboxes to the uploader",
+    "scope": "accounts",
+    "description": "Uses the credentials stored encrypted at upload time — no CSV needed. Optional body {itemIds} limits the retry to specific items. Returns {retried, skippedNoCredentials, batchesResubmitted, batchesFailed}; items without stored credentials (uploaded before this feature or past the 7-day purge) are skipped and need the CSV re-uploaded.",
+    "body": true,
+    "idempotent": true
+  },
+  {
+    "method": "post",
+    "path": "/email-accounts/uploads/group/{uploadId}/retry-failures",
+    "tag": "Email Accounts",
+    "summary": "Resubmit failed inboxes across every per-domain batch of one upload group",
+    "scope": "accounts",
+    "description": "Group-level form of retry-failures: uploadId is the upload_id from GET /email-accounts/uploads. Same response shape and credential rules as the per-batch endpoint.",
     "idempotent": true
   },
   {
