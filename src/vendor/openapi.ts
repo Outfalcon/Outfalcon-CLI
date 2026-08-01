@@ -1145,6 +1145,16 @@ export const ROUTE_REGISTRY: RouteDef[] = [
   },
   {
     "method": "post",
+    "path": "/leads/lists/{id}/leads/remove",
+    "tag": "Leads",
+    "summary": "Remove specific leads (by id) from a list",
+    "scope": "leads",
+    "description": "Mirror of the add: removes up to 10,000 lead ids from the list's membership (lead records are untouched; ids not in the list are silently skipped). Returns {removed}. 404 for a list outside the workspace. A 'move' between lists = bulk add to the target + this against the source.",
+    "body": true,
+    "reqSchema": "LeadIdsRemoveInput"
+  },
+  {
+    "method": "post",
     "path": "/leads/bulk-delete",
     "tag": "Leads",
     "summary": "Delete specific leads (by id) from the workspace",
@@ -1619,7 +1629,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Campaigns",
     "summary": "Send a rendered test email",
     "scope": "campaigns",
-    "description": "Renders step_order (default 1) / variant_label (default 'A') — optionally against a real lead_id for variable values — and sends one-off to `to`. Sends from the first active inbox assigned to the campaign; 422 if none is assigned. Returns 201 {sent:true,...}.",
+    "description": "Renders step_order (default 1) / variant_label (default 'A') — optionally against a real lead_id for variable values, and/or with subject/body overrides to test unsaved draft copy — and sends one-off to `to`. Sends from account_id when given (workspace-scoped), else the first active inbox assigned to the campaign; 422 if none. {{sender_*}} variables resolve against the sending inbox, and the send counts toward that inbox's daily limit. Returns 201 {sent:true,...}.",
     "body": true,
     "reqSchema": "SendTestInput"
   },
@@ -3923,6 +3933,18 @@ export const openapiSpec = { components: { schemas: {
       "lead_id": {
         "type": "string",
         "description": "render with this lead's data"
+      },
+      "account_id": {
+        "type": "string",
+        "description": "send from this connected inbox (must belong to the workspace); default = first active inbox assigned to the campaign"
+      },
+      "subject": {
+        "type": "string",
+        "description": "override the stored variant subject (send unsaved draft copy)"
+      },
+      "body": {
+        "type": "string",
+        "description": "override the stored variant body_html (send unsaved draft copy)"
       }
     }
   },
@@ -4788,6 +4810,21 @@ export const openapiSpec = { components: { schemas: {
           "type": "string"
         },
         "description": "Lead ids to add (max 10,000)"
+      }
+    }
+  },
+  "LeadIdsRemoveInput": {
+    "type": "object",
+    "required": [
+      "lead_ids"
+    ],
+    "properties": {
+      "lead_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Lead ids to remove from the list (max 10,000)"
       }
     }
   },
