@@ -66,6 +66,10 @@ export const TAGS: Array<{ name: string; description: string }> = [
     "description": "Folders for organizing lead lists."
   },
   {
+    "name": "Lead Views",
+    "description": "Saved lead-grid views: a named filter set + column layout, scoped to the workspace or to one list."
+  },
+  {
     "name": "Campaigns",
     "description": "Sequenced outbound campaigns: steps + A/B variants, schedule and sending settings, sender-account assignment, per-campaign leads, metrics, previews and test sends."
   },
@@ -137,6 +141,14 @@ export const TAGS: Array<{ name: string; description: string }> = [
   {
     "name": "Jobs",
     "description": "Poll async jobs returned by bulk operations (202 responses)."
+  },
+  {
+    "name": "Bounces",
+    "description": "Bounced sends with parsed DSN reasons and a rollup summary by bounce category."
+  },
+  {
+    "name": "Activities",
+    "description": "The workspace audit log: who changed what, when, across the app and the API."
   }
 ];
 
@@ -163,7 +175,8 @@ export const TAG_GROUPS: Array<{ name: string; tags: string[] }> = [
     "name": "Leads",
     "tags": [
       "Leads",
-      "Lead List Groups"
+      "Lead List Groups",
+      "Lead Views"
     ]
   },
   {
@@ -193,6 +206,8 @@ export const TAG_GROUPS: Array<{ name: string; tags: string[] }> = [
     "name": "Analytics & Platform",
     "tags": [
       "Analytics",
+      "Bounces",
+      "Activities",
       "Blocklist",
       "Webhooks",
       "Integrations",
@@ -403,8 +418,20 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Email Accounts",
     "summary": "List email accounts",
     "scope": "accounts",
-    "description": "Every connected (non-deleted) sender inbox with connection-health fields (send_status/receive_status, send_error/receive_error, last_checked_at), sending settings (daily_limit, ramp-up) and tag_ids.",
-    "cursor": true
+    "description": "Every connected (non-deleted) sender inbox with connection-health fields (send_status/receive_status, send_error/receive_error, last_checked_at), sending settings (daily_limit, ramp-up) and tag_ids. Returns the full list by default; pass ?q= to find an inbox by address or display name, and ?page/?limit to paginate (adds the standard meta block).",
+    "query": [
+      {
+        "name": "q",
+        "description": "Case-insensitive substring match on email or display name"
+      },
+      {
+        "name": "page"
+      },
+      {
+        "name": "limit",
+        "description": "Max 200 (default 50); only applied when page or limit is given"
+      }
+    ]
   },
   {
     "method": "post",
@@ -475,6 +502,16 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "description": "Same per-account shape as POST /email-accounts; rows missing email/password/smtp_host/smtp_port or duplicating an existing email are skipped rather than failing the batch. Tag names auto-create. Returns {added, skipped, errors}.",
     "body": true,
     "reqSchema": "EmailAccountsBulkInput"
+  },
+  {
+    "method": "delete",
+    "path": "/email-accounts/bulk",
+    "tag": "Email Accounts",
+    "summary": "Bulk disconnect accounts",
+    "scope": "accounts",
+    "description": "The counterpart to POST /email-accounts/bulk: soft-deletes up to 1,000 accounts (same as DELETE /email-accounts/{id}) so history and sends stay attributable. Ids outside the workspace or already deleted count as skipped. Returns {deleted, skipped}. To stop sending without disconnecting, use POST /email-accounts/{id}/suspend or PATCH /email-accounts/bulk/settings.",
+    "body": true,
+    "reqSchema": "IdsInput"
   },
   {
     "method": "patch",
@@ -981,7 +1018,12 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Leads",
     "summary": "List lead lists",
     "scope": "leads",
+    "description": "Use ?q= to resolve a list by name instead of enumerating every list.",
     "query": [
+      {
+        "name": "q",
+        "description": "Case-insensitive substring match on the list name"
+      },
       {
         "name": "archived",
         "description": "Set to 1/true to list archived lead lists instead of active ones",
@@ -1066,7 +1108,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Leads",
     "summary": "Bulk-remove leads matching the query filters from a list (at least one filter required)",
     "scope": "leads",
-    "description": "Removes matching leads' membership from THIS list only; a lead's record is fully deleted only when nothing else (another list or a campaign) references it. 400 without a constraining filter — deleting the whole list is DELETE /leads/lists/{id}. Returns {removed, deleted}.",
+    "description": "Removes matching leads' membership from THIS list only. NOTE: by default it then HARD-DELETES any of those lead records that nothing else references (no other list, no campaign) — pass delete_orphans=0 to remove membership only and leave the records in the workspace. 400 without a constraining filter — deleting the whole list is DELETE /leads/lists/{id}. Returns {removed, deleted}; count_only=1 returns those counts without writing. To remove a known set of ids instead of a filter match, use POST /leads/lists/{id}/leads/remove.",
     "query": [
       {
         "name": "q",
@@ -1110,6 +1152,22 @@ export const ROUTE_REGISTRY: RouteDef[] = [
       },
       {
         "name": "var_values"
+      },
+      {
+        "name": "delete_orphans",
+        "description": "0 = keep lead records that end up referenced by nothing (default deletes them)",
+        "enum": [
+          "0",
+          "false"
+        ]
+      },
+      {
+        "name": "count_only",
+        "description": "Dry run — return {removed, deleted} without writing",
+        "enum": [
+          "1",
+          "true"
+        ]
       }
     ]
   },
@@ -1509,12 +1567,62 @@ export const ROUTE_REGISTRY: RouteDef[] = [
   },
   {
     "method": "get",
+    "path": "/lead-views",
+    "tag": "Lead Views",
+    "summary": "List saved lead-grid views",
+    "scope": "leads",
+    "description": "Workspace-shared saved views for the lead grid. Each view bundles grid state (filters, operator conditions, sort levels, visible columns/order/widths) as an opaque JSON config. Filter with ?scope=all|list|campaign — the grid surface the view belongs to."
+  },
+  {
+    "method": "post",
+    "path": "/lead-views",
+    "tag": "Lead Views",
+    "summary": "Create a saved lead-grid view",
+    "scope": "leads",
+    "description": "Creates a view visible to the whole workspace. scope is the grid surface it appears on: 'all' (workspace lead directory), 'list' (lead-list detail) or 'campaign' (campaign leads panel). config is an arbitrary JSON object (max 16KB) the UI interprets.",
+    "body": true,
+    "reqSchema": "LeadViewInput"
+  },
+  {
+    "method": "patch",
+    "path": "/lead-views/{id}",
+    "tag": "Lead Views",
+    "summary": "Update a saved lead-grid view",
+    "scope": "leads",
+    "description": "Updates name, emoji and/or config. Scope is immutable — create a new view instead.",
+    "body": true,
+    "reqSchema": "LeadViewUpdateInput"
+  },
+  {
+    "method": "delete",
+    "path": "/lead-views/{id}",
+    "tag": "Lead Views",
+    "summary": "Delete a saved lead-grid view",
+    "scope": "leads",
+    "description": "Deletes the view for everyone in the workspace (204)."
+  },
+  {
+    "method": "put",
+    "path": "/lead-views/reorder",
+    "tag": "Lead Views",
+    "summary": "Reorder saved lead-grid views",
+    "scope": "leads",
+    "description": "Body ids = view ids in the desired display order; views not listed keep their relative position after the listed ones. Returns the full reordered set.",
+    "body": true,
+    "reqSchema": "LeadViewReorderInput"
+  },
+  {
+    "method": "get",
     "path": "/campaigns",
     "tag": "Campaigns",
     "summary": "List campaigns",
     "scope": "campaigns",
-    "description": "Each row includes rollup counters (lead_count, step_count, total_sent/replied/bounced/positive) alongside settings and status.",
+    "description": "Each row includes rollup counters (lead_count, step_count, total_sent/replied/bounced/positive) alongside settings and status. Use ?q= to resolve a campaign by name instead of pulling the whole list.",
     "query": [
+      {
+        "name": "q",
+        "description": "Case-insensitive substring match on the campaign name"
+      },
       {
         "name": "archived",
         "description": "Set to 1/true to list archived campaigns instead of active ones",
@@ -1531,7 +1639,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Campaigns",
     "summary": "Create a campaign",
     "scope": "campaigns",
-    "description": "Creates a draft campaign pre-seeded with one empty step (order 1) and one 'A' variant at 100% weight — fill those in rather than adding a duplicate first step. An unknown/foreign group_id is stored as null. Returns 201.",
+    "description": "Creates a draft campaign pre-seeded with one empty step (order 1) and one 'A' variant at 100% weight — fill those in rather than adding a duplicate first step. An unknown/foreign group_id is stored as null. Returns 201. Retry-safe: repeating the same name within 60 seconds returns the existing draft with 200 instead of creating a second identical campaign, so a timed-out create can be retried.",
     "body": true,
     "reqSchema": "CampaignCreateInput",
     "idempotent": true
@@ -1545,6 +1653,16 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "description": "Hard-deletes every listed campaign that belongs to this workspace; foreign/unknown ids are silently skipped. Returns {deleted} with the actual count. Irreversible — prefer status 'archived' (PATCH /campaigns/{id}/status) for a restorable hide.",
     "body": true,
     "reqSchema": "IdsInput"
+  },
+  {
+    "method": "patch",
+    "path": "/campaigns/bulk",
+    "tag": "Campaigns",
+    "summary": "Bulk move campaigns into a group",
+    "scope": "campaigns",
+    "description": "Sets group_id on up to 1,000 campaigns at once; pass group_id null to ungroup. An unknown or foreign group_id resolves to null (ungrouped) rather than erroring. Returns {updated}.",
+    "body": true,
+    "reqSchema": "CampaignBulkGroupInput"
   },
   {
     "method": "get",
@@ -1568,7 +1686,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Campaigns",
     "summary": "Update a campaign",
     "scope": "campaigns",
-    "description": "Partial update of campaign settings (name, group, schedule, limits, priorities, monitoring, agent_id...). Invalid enum/out-of-range values are silently skipped rather than erroring, so re-read the response to confirm what stuck. Does not change status — use PATCH /campaigns/{id}/status.",
+    "description": "Partial update of campaign settings (name, group, schedule, limits, priorities, monitoring, agent_id...). Invalid enum/out-of-range values and unknown fields are skipped rather than failing the whole update; any that did not stick are listed in meta.ignored_fields. Does not change status — use PATCH /campaigns/{id}/status.",
     "body": true,
     "reqSchema": "CampaignUpdateInput"
   },
@@ -1586,7 +1704,9 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Campaigns",
     "summary": "Duplicate a campaign",
     "scope": "campaigns",
-    "description": "Creates a draft copy named '<name> (Copy)' with all settings, steps + variants, inbox/tag assignments, and the same leads re-enrolled fresh at step 0 (status 'new'). Send history and counters are not copied. Returns the new campaign (201).",
+    "description": "Creates a draft copy with all settings and steps + variants. Body is optional: name (default '<name> (Copy)'), include_leads (default true — the same leads re-enrolled fresh at step 0, status 'new'), include_accounts (default true — inbox and tag assignments). Send history and counters are never copied. To reuse a sequence with a different audience, duplicate with include_leads:false and then POST /campaigns/{id}/leads. Returns the new campaign (201).",
+    "body": true,
+    "reqSchema": "CampaignDuplicateInput",
     "idempotent": true
   },
   {
@@ -1745,6 +1865,16 @@ export const ROUTE_REGISTRY: RouteDef[] = [
   },
   {
     "method": "post",
+    "path": "/campaigns/{id}/accounts/bulk",
+    "tag": "Campaigns",
+    "summary": "Bulk-assign inboxes",
+    "scope": "campaigns",
+    "description": "Assigns up to 1,000 inboxes to the campaign in one call (body account_ids: string[]) — the mirror of /accounts/bulk-remove. Accounts outside the workspace and ones already assigned count as skipped rather than failing the batch. Returns {added, skipped} (201). For a tag-synced assignment that follows tag membership over time, use POST /campaigns/{id}/accounts/by-tag instead.",
+    "body": true,
+    "reqSchema": "AccountBulkAssignInput"
+  },
+  {
+    "method": "post",
     "path": "/campaigns/{id}/accounts/bulk-remove",
     "tag": "Campaigns",
     "summary": "Bulk-remove inboxes",
@@ -1771,6 +1901,16 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "description": "Enrolls every member of the lead list (body list_id) at step 0 with status 'new'; leads already in the campaign are skipped. Returns {added, skipped}. Blocklist/DNC is enforced at send time, not at enrollment. To enroll a single lead use POST /leads/{id}/push-to-campaign.",
     "body": true,
     "reqSchema": "CampaignAddLeadsInput"
+  },
+  {
+    "method": "delete",
+    "path": "/campaigns/{id}/leads",
+    "tag": "Campaigns",
+    "summary": "Bulk-remove leads from a campaign",
+    "scope": "campaigns",
+    "description": "The counterpart to POST /campaigns/{id}/leads. Filter with campaign_lead_ids, lead_ids or statuses (max 10,000 ids); an unfiltered call requires an explicit all_leads:true. preserve_history (default true) protects analytics: leads that have already been sent to are set to status 'completed' (the engine stops sending to them) instead of being deleted, because send rows and warm-sequence runs cascade off the enrollment — only never-sent leads are actually deleted. preserve_history:false purges everything matched and permanently destroys that send history. count_only:true is a dry run that writes nothing. Returns {matched, removed, stopped}. The leads themselves and their lists are never touched.",
+    "body": true,
+    "reqSchema": "CampaignLeadsBulkRemoveInput"
   },
   {
     "method": "get",
@@ -1813,6 +1953,20 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "summary": "This campaign's upcoming sends",
     "scope": "campaigns",
     "description": "Same item shape as GET /scheduled-emails, pre-filtered to this campaign. Supports ?parked=1 plus page/limit."
+  },
+  {
+    "method": "get",
+    "path": "/campaigns/{id}/sending-forecast",
+    "tag": "Campaigns",
+    "summary": "Per-day sending forecast with the limiting factor named",
+    "scope": "campaigns",
+    "description": "Read-only projection of sends per local day (campaign timezone): days[] with {date, projected, demand, capacity, binding_constraint, detail}. binding_constraint is one of no_backlog | inbox_pacing | rampup | inbox_limits | priority_shared | campaign_limit | schedule_closed | holiday | campaign_paused. Also returns parked_leads (held with no due time) and a summary with the dominant constraint.",
+    "query": [
+      {
+        "name": "days",
+        "description": "Forecast horizon in days (default 14, max 30)"
+      }
+    ]
   },
   {
     "method": "post",
@@ -2252,8 +2406,19 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Inbox",
     "summary": "List inbox messages",
     "scope": "inbox",
-    "description": "Received messages for one inbox (accountId from GET /email-accounts). Paginates with ?top= (default 25) and ?skip=, plus ?search=. For the cross-inbox view use GET /inbox/feed or /inbox/threads.",
-    "cursor": true
+    "description": "Received messages for one inbox (accountId from GET /email-accounts). Paginates with ?top= (max 200, default 25) and ?skip=, plus ?search=. For the cross-inbox view use GET /inbox/feed or /inbox/threads.",
+    "query": [
+      {
+        "name": "top",
+        "description": "Page size, max 200 (default 25)"
+      },
+      {
+        "name": "skip"
+      },
+      {
+        "name": "search"
+      }
+    ]
   },
   {
     "method": "get",
@@ -2595,7 +2760,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
       },
       {
         "name": "size",
-        "description": "Page size, max 100 (default 25)"
+        "description": "Page size, max 100 (default 25); `limit` is accepted as an alias"
       },
       {
         "name": "conversationId",
@@ -2773,6 +2938,48 @@ export const ROUTE_REGISTRY: RouteDef[] = [
   },
   {
     "method": "get",
+    "path": "/analytics/sending-schedule",
+    "tag": "Analytics",
+    "summary": "Org-wide sending schedule for a date (sent + projected per active campaign)",
+    "scope": "campaigns",
+    "description": "For every active campaign: actual sends on the date (counted in the campaign's own timezone), forecast sends still to go out, the daily-limit target, progress 0..1, and the limiting factor. Future dates report projections only; past dates report actuals only.",
+    "query": [
+      {
+        "name": "date",
+        "description": "YYYY-MM-DD (default today, UTC)"
+      }
+    ]
+  },
+  {
+    "method": "get",
+    "path": "/analytics/failed-sends",
+    "tag": "Analytics",
+    "summary": "Failed campaign sends log",
+    "scope": "campaigns",
+    "description": "Paginated campaign_sends with status 'failed', newest first, joined with campaign/lead/inbox. `error` is the sending inbox's engine-recorded send error (per-send error text is not persisted). Filters: from/to (YYYY-MM-DD), campaign_id, page/limit (max 200).",
+    "query": [
+      {
+        "name": "from",
+        "description": "YYYY-MM-DD lower bound"
+      },
+      {
+        "name": "to",
+        "description": "YYYY-MM-DD upper bound"
+      },
+      {
+        "name": "campaign_id"
+      },
+      {
+        "name": "page"
+      },
+      {
+        "name": "limit",
+        "description": "max 200"
+      }
+    ]
+  },
+  {
+    "method": "get",
     "path": "/analytics/by-hour",
     "tag": "Analytics",
     "summary": "Stats bucketed by hour-of-day of send",
@@ -2797,6 +3004,16 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "body": true,
     "reqSchema": "BlocklistInput",
     "idempotent": true
+  },
+  {
+    "method": "delete",
+    "path": "/blocklist",
+    "tag": "Blocklist",
+    "summary": "Bulk-remove blocklist entries",
+    "scope": "accounts",
+    "description": "The counterpart to the bulk POST and POST /blocklist/import, which both add thousands at a time. Body {ids:[...]} and/or {values:[...]} (max 10,000 combined); values are the email/domain strings themselves, so an import can be undone from the same list it was imported from, and are matched case-insensitively. Unknown ids/values are silently skipped. Returns {removed}.",
+    "body": true,
+    "reqSchema": "BlocklistBulkRemoveInput"
   },
   {
     "method": "delete",
@@ -2959,57 +3176,41 @@ export const ROUTE_REGISTRY: RouteDef[] = [
   },
   {
     "method": "get",
+    "path": "/jobs",
+    "tag": "Jobs",
+    "summary": "List async jobs",
+    "scope": "none",
+    "description": "This workspace's jobs, newest first — use it to recover a job_id you no longer have (a dropped response, a new session). Filter with ?type= (e.g. leads.bulk_upsert) and ?status=. Same row shape as GET /jobs/{id}.",
+    "query": [
+      {
+        "name": "type",
+        "description": "Job type, e.g. leads.bulk_upsert"
+      },
+      {
+        "name": "status",
+        "enum": [
+          "pending",
+          "running",
+          "completed",
+          "failed"
+        ]
+      },
+      {
+        "name": "page"
+      },
+      {
+        "name": "limit",
+        "description": "Max 200 (default 50)"
+      }
+    ]
+  },
+  {
+    "method": "get",
     "path": "/jobs/{id}",
     "tag": "Jobs",
     "summary": "Poll an async job",
     "scope": "none",
-    "description": "id is the job_id from a 202 response. Returns {id, type, status (pending|running|completed|failed), progress, result, error}; result holds the operation's payload once status is 'completed'. Jobs expire and 404 after a retention window."
-  },
-  {
-    "method": "get",
-    "path": "/lead-views",
-    "tag": "Lead Views",
-    "summary": "List saved lead-grid views",
-    "scope": "leads",
-    "description": "Workspace-shared saved views for the lead grid. Each view bundles grid state (filters, operator conditions, sort levels, visible columns/order/widths) as an opaque JSON config. Filter with ?scope=all|list|campaign — the grid surface the view belongs to."
-  },
-  {
-    "method": "post",
-    "path": "/lead-views",
-    "tag": "Lead Views",
-    "summary": "Create a saved lead-grid view",
-    "scope": "leads",
-    "description": "Creates a view visible to the whole workspace. scope is the grid surface it appears on: 'all' (workspace lead directory), 'list' (lead-list detail) or 'campaign' (campaign leads panel). config is an arbitrary JSON object (max 16KB) the UI interprets.",
-    "body": true,
-    "reqSchema": "LeadViewInput"
-  },
-  {
-    "method": "patch",
-    "path": "/lead-views/{id}",
-    "tag": "Lead Views",
-    "summary": "Update a saved lead-grid view",
-    "scope": "leads",
-    "description": "Updates name, emoji and/or config. Scope is immutable — create a new view instead.",
-    "body": true,
-    "reqSchema": "LeadViewUpdateInput"
-  },
-  {
-    "method": "delete",
-    "path": "/lead-views/{id}",
-    "tag": "Lead Views",
-    "summary": "Delete a saved lead-grid view",
-    "scope": "leads",
-    "description": "Deletes the view for everyone in the workspace (204)."
-  },
-  {
-    "method": "put",
-    "path": "/lead-views/reorder",
-    "tag": "Lead Views",
-    "summary": "Reorder saved lead-grid views",
-    "scope": "leads",
-    "description": "Body ids = view ids in the desired display order; views not listed keep their relative position after the listed ones. Returns the full reordered set.",
-    "body": true,
-    "reqSchema": "LeadViewReorderInput"
+    "description": "id is the job_id from a 202 response. Returns {id, type, status (pending|running|completed|failed), progress, result, error}; result holds the operation's payload once status is 'completed'. progress is a 0-100 percentage that advances while the job runs. A job whose process died mid-run is failed by the reaper within ~15 minutes rather than sitting at 'running' forever, so polling always terminates. Jobs expire and 404 after a retention window; GET /jobs lists the ones still held."
   },
   {
     "method": "get",
@@ -3122,10 +3323,17 @@ export const ROUTE_REGISTRY: RouteDef[] = [
       },
       {
         "name": "top",
-        "description": "Page size, max 200 (default 50)"
+        "description": "Page size, max 200 (default 50); `limit` is accepted as an alias"
       },
       {
-        "name": "skip"
+        "name": "skip",
+        "description": "Rows to skip; `page` (1-based) is accepted as an alias"
+      },
+      {
+        "name": "page"
+      },
+      {
+        "name": "limit"
       }
     ]
   }
@@ -4579,6 +4787,62 @@ export const openapiSpec = { components: { schemas: {
       }
     }
   },
+  "AccountBulkAssignInput": {
+    "type": "object",
+    "required": [
+      "account_ids"
+    ],
+    "properties": {
+      "account_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "account ids to assign; max 1,000"
+      }
+    }
+  },
+  "CampaignBulkGroupInput": {
+    "type": "object",
+    "required": [
+      "ids"
+    ],
+    "properties": {
+      "ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "campaign ids to move; max 1,000"
+      },
+      "group_id": {
+        "type": [
+          "string",
+          "null"
+        ],
+        "description": "target campaign group, or null to ungroup"
+      }
+    }
+  },
+  "BlocklistBulkRemoveInput": {
+    "type": "object",
+    "properties": {
+      "ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "blocklist entry ids"
+      },
+      "values": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "entry values (emails or domains), matched case-insensitively"
+      }
+    }
+  },
   "CampaignAddLeadsInput": {
     "type": "object",
     "required": [
@@ -4588,6 +4852,73 @@ export const openapiSpec = { components: { schemas: {
       "list_id": {
         "type": "string",
         "description": "add all leads from this list"
+      }
+    }
+  },
+  "CampaignDuplicateInput": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "name for the copy; defaults to '<name> (Copy)'"
+      },
+      "include_leads": {
+        "type": "boolean",
+        "description": "copy the enrolled leads (default true); false gives the same sequence with no audience"
+      },
+      "include_accounts": {
+        "type": "boolean",
+        "description": "copy inbox and tag assignments (default true)"
+      }
+    }
+  },
+  "CampaignLeadsBulkRemoveInput": {
+    "type": "object",
+    "properties": {
+      "campaign_lead_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "campaign-lead ids (the `id` from GET /campaigns/{id}/leads); max 10,000"
+      },
+      "lead_ids": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "lead ids (the `lead_id` from GET /campaigns/{id}/leads); max 10,000"
+      },
+      "statuses": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "enum": [
+            "new",
+            "sending",
+            "contacted",
+            "replied",
+            "interested",
+            "not_interested",
+            "bounced",
+            "completed",
+            "unsubscribed",
+            "skipped"
+          ]
+        },
+        "description": "remove every lead currently in these statuses"
+      },
+      "all_leads": {
+        "type": "boolean",
+        "description": "required (true) when no other filter is given — removes every lead in the campaign"
+      },
+      "preserve_history": {
+        "type": "boolean",
+        "description": "default true: already-sent leads become 'completed' instead of being deleted, so their send history and analytics survive. false permanently destroys it."
+      },
+      "count_only": {
+        "type": "boolean",
+        "description": "dry run — returns the same counts without writing"
       }
     }
   },
