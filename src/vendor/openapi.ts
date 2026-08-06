@@ -592,6 +592,17 @@ export const ROUTE_REGISTRY: RouteDef[] = [
   },
   {
     "method": "post",
+    "path": "/email-accounts/google/bulk",
+    "tag": "Email Accounts",
+    "summary": "Bulk-import Google Workspace inboxes via the external uploader (503 when Google OAuth or the uploader is not configured on this server)",
+    "scope": "accounts",
+    "description": "Like the Microsoft bulk import, but for Gmail/Workspace inboxes. Google requires a Workspace admin to trust our OAuth client in the admin console once before any inbox can grant the Gmail scope. `mode` describes the panel layout: 'per-domain' (default — each email domain is its own Workspace, so that domain's admin runs the trust in its own session) or 'single-panel' (all domains are secondary domains under one Workspace with one admin, whose batch runs first and releases the rest on success). `automateTrust` (default true) has the uploader perform the admin-console trust; set false when the admin already trusted the client by hand. The admin row is the one with role='admin', else the first row of its group. Returns {submitted, gated, batches, failedDomains}; gated inboxes are queued behind the admin and connect once it succeeds.",
+    "body": true,
+    "reqSchema": "GoogleBulkInput",
+    "idempotent": true
+  },
+  {
+    "method": "post",
     "path": "/email-accounts/uploads/{batchId}/retry-failures",
     "tag": "Email Accounts",
     "summary": "Resubmit a bulk-upload batch's failed (and stale in-flight) inboxes to the uploader",
@@ -1898,7 +1909,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Campaigns",
     "summary": "Add leads from a list",
     "scope": "campaigns",
-    "description": "Enrolls every member of the lead list (body list_id) at step 0 with status 'new'; leads already in the campaign are skipped. Returns {added, skipped}. Blocklist/DNC is enforced at send time, not at enrollment. To enroll a single lead use POST /leads/{id}/push-to-campaign.",
+    "description": "Enrolls every member of the lead list (body list_id) at step 0 with status 'new'; leads already in the campaign are skipped. Returns {added, skipped, skippedOtherCampaigns} — the last is non-zero only when the campaign has skip_leads_in_other_campaigns enabled, which additionally skips leads enrolled in a DIFFERENT campaign. Blocklist/DNC is enforced at send time, not at enrollment. To enroll a single lead use POST /leads/{id}/push-to-campaign.",
     "body": true,
     "reqSchema": "CampaignAddLeadsInput"
   },
@@ -4600,6 +4611,14 @@ export const openapiSpec = { components: { schemas: {
           1
         ]
       },
+      "skip_leads_in_other_campaigns": {
+        "type": "integer",
+        "enum": [
+          0,
+          1
+        ],
+        "description": "when adding leads, skip anyone already enrolled in a different campaign (default 0 — overlapping campaigns are allowed)"
+      },
       "send_mode": {
         "type": "string",
         "description": "fixed_tz | recipient_tz | 24_7"
@@ -5709,6 +5728,62 @@ export const openapiSpec = { components: { schemas: {
             }
           }
         }
+      },
+      "fileName": {
+        "type": "string",
+        "description": "Source file name shown on the Pending Uploads page"
+      }
+    }
+  },
+  "GoogleBulkInput": {
+    "type": "object",
+    "required": [
+      "accounts"
+    ],
+    "properties": {
+      "accounts": {
+        "type": "array",
+        "description": "Google Workspace inboxes to import; credentials are forwarded to the uploader and kept encrypted up to 7 days solely for retry-failures",
+        "items": {
+          "type": "object",
+          "required": [
+            "email",
+            "password"
+          ],
+          "properties": {
+            "email": {
+              "type": "string",
+              "format": "email"
+            },
+            "password": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string",
+              "description": "Display name"
+            },
+            "otp_secret": {
+              "type": "string",
+              "description": "TOTP secret when the inbox has 2FA"
+            },
+            "role": {
+              "type": "string",
+              "description": "Set to 'admin' to mark the Workspace panel admin that performs the admin-console trust; otherwise the first row of the group is assumed admin"
+            }
+          }
+        }
+      },
+      "mode": {
+        "type": "string",
+        "enum": [
+          "per-domain",
+          "single-panel"
+        ],
+        "description": "Panel layout. 'per-domain' (default): each email domain is its own Workspace. 'single-panel': all domains are secondary domains under one Workspace with one admin."
+      },
+      "automateTrust": {
+        "type": "boolean",
+        "description": "Whether the uploader performs the admin-console trust step (default true). Set false when the admin already trusted our OAuth client by hand."
       },
       "fileName": {
         "type": "string",
