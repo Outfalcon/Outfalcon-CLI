@@ -976,11 +976,11 @@ export const ROUTE_REGISTRY: RouteDef[] = [
       },
       {
         "name": "seg",
-        "description": "protected or none",
-        "enum": [
-          "protected",
-          "none"
-        ]
+        "description": "SEG vendor name (Mimecast, Proofpoint, Barracuda, ...) or the shortcuts 'protected' (any SEG) / 'none'; repeat the param to match any of several"
+      },
+      {
+        "name": "contact_status",
+        "description": "Campaign enrollment status (new, in_progress, replied, bounced, ...); repeat to match any of several"
       },
       {
         "name": "has_company",
@@ -1100,7 +1100,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Leads",
     "summary": "List leads in a list",
     "scope": "leads",
-    "description": "Also accepts grid-filter query params: q (free text), source, email_type, email_status, esp, seg (protected|none), has_company, has_phone, var_key/var_values (custom-variable match), sort, dir. Passing ?cursor= switches from page/limit to keyset pagination.",
+    "description": "Also accepts grid-filter query params: q (free text), source, email_type, email_status, esp, seg (vendor name, 'protected', or 'none'; repeatable), contact_status (repeatable), has_company, has_phone, var_key/var_values (custom-variable match), sort, dir. Passing ?cursor= switches from page/limit to keyset pagination.",
     "cursor": true
   },
   {
@@ -1139,10 +1139,11 @@ export const ROUTE_REGISTRY: RouteDef[] = [
       },
       {
         "name": "seg",
-        "enum": [
-          "protected",
-          "none"
-        ]
+        "description": "SEG vendor name, 'protected', or 'none'; repeatable"
+      },
+      {
+        "name": "contact_status",
+        "description": "Campaign enrollment status; repeatable"
       },
       {
         "name": "has_company",
@@ -1299,11 +1300,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
       },
       {
         "name": "seg",
-        "description": "'protected' = behind a secure email gateway, 'none' = not",
-        "enum": [
-          "protected",
-          "none"
-        ]
+        "description": "SEG vendor name (Mimecast, Proofpoint, ...) or 'protected' = behind any secure email gateway, 'none' = not; repeatable"
       },
       {
         "name": "source",
@@ -1514,10 +1511,11 @@ export const ROUTE_REGISTRY: RouteDef[] = [
       },
       {
         "name": "seg",
-        "enum": [
-          "protected",
-          "none"
-        ]
+        "description": "SEG vendor name, 'protected', or 'none'; repeatable"
+      },
+      {
+        "name": "contact_status",
+        "description": "Campaign enrollment status; repeatable"
       },
       {
         "name": "has_company",
@@ -1715,7 +1713,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Campaigns",
     "summary": "Duplicate a campaign",
     "scope": "campaigns",
-    "description": "Creates a draft copy with all settings and steps + variants. Body is optional: name (default '<name> (Copy)'), include_leads (default true — the same leads re-enrolled fresh at step 0, status 'new'), include_accounts (default true — inbox and tag assignments). Send history and counters are never copied. To reuse a sequence with a different audience, duplicate with include_leads:false and then POST /campaigns/{id}/leads. Returns the new campaign (201).",
+    "description": "Creates a draft copy with all settings and steps + variants (including on-reply/LinkedIn steps), subsequence attachments and the AI agent link. Body is optional: name (default '<name> (Copy)'), include_leads (default true — the same leads re-enrolled fresh at step 0, status 'new'), include_accounts (default true — inbox and tag assignments). Send history and counters are never copied. To reuse a sequence with a different audience, duplicate with include_leads:false and then POST /campaigns/{id}/leads. Returns the new campaign (201).",
     "body": true,
     "reqSchema": "CampaignDuplicateInput",
     "idempotent": true
@@ -2200,6 +2198,16 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "description": "Atomic full replacement of the subsequence's DAG: nodes and edges arrays are required (an optional flow object updates metadata in the same call). Node types include AI reply, email, LinkedIn connect/DM, call-task, wait and condition. Returns the saved graph.",
     "body": true,
     "reqSchema": "FlowGraphInput"
+  },
+  {
+    "method": "post",
+    "path": "/flows/{id}/duplicate",
+    "tag": "Subsequences",
+    "summary": "Duplicate a subsequence",
+    "scope": "campaigns",
+    "description": "Independent copy of the subsequence and its full node + edge graph — later edits to either never affect the other. The copy starts as a draft with a deduped name (default '<name> (Copy)'). Optional campaign_id also attaches the copy to that campaign. Returns the new subsequence (201).",
+    "body": true,
+    "reqSchema": "FlowDuplicateInput"
   },
   {
     "method": "get",
@@ -3776,6 +3784,11 @@ export const openapiSpec = { components: { schemas: {
           "string",
           "null"
         ]
+      },
+      "skip_leads_in_other_campaigns": {
+        "type": "boolean",
+        "default": false,
+        "description": "When adding leads later, skip any already enrolled in a different campaign"
       }
     }
   },
@@ -3836,6 +3849,20 @@ export const openapiSpec = { components: { schemas: {
       },
       "exit_config": {
         "$ref": "#/components/schemas/KeysConfig"
+      }
+    }
+  },
+  "FlowDuplicateInput": {
+    "type": "object",
+    "description": "Independent-copy semantics: the duplicate gets its own nodes and edges, so editing one never changes the other.",
+    "properties": {
+      "name": {
+        "type": "string",
+        "description": "Name for the copy (deduped; default '<name> (Copy)')"
+      },
+      "campaign_id": {
+        "type": "string",
+        "description": "Also attach the copy to this campaign"
       }
     }
   },
