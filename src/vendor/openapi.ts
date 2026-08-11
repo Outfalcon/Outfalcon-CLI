@@ -539,6 +539,16 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "scope": "accounts"
   },
   {
+    "method": "post",
+    "path": "/email-accounts/{id}/move",
+    "tag": "Email Accounts",
+    "summary": "Move an inbox to another workspace",
+    "scope": "accounts",
+    "description": "Moves the inbox — credentials, threads, and account-level history — into target_workspace_id. The API key's owner must hold the owner or admin role in BOTH the inbox's current workspace and the target (the account id may reference a workspace other than the key's active one). Detaches the inbox from every campaign in its old workspace (returned as detached_campaigns); campaign analytics stays with the old workspace. 409 if the target already has a live inbox with the same address.",
+    "body": true,
+    "reqSchema": "EmailAccountMoveInput"
+  },
+  {
     "method": "get",
     "path": "/email-accounts/connect-link",
     "tag": "Email Accounts",
@@ -3007,6 +3017,14 @@ export const ROUTE_REGISTRY: RouteDef[] = [
   },
   {
     "method": "get",
+    "path": "/analytics/recipient-esp",
+    "tag": "Analytics",
+    "summary": "Stats bucketed by recipient mail provider (lead-side MX classification)",
+    "scope": "campaigns",
+    "description": "Reply/bounce rates per recipient provider (gmail, outlook, yahoo, apple, zoho, other, unknown — leads.esp from MX records). Distinct from the `esp` filter, which is the SENDER-side transport. Accepts the shared campaign_ids/tag_ids/esp/start/end filters."
+  },
+  {
+    "method": "get",
     "path": "/blocklist",
     "tag": "Blocklist",
     "summary": "List blocklist entries",
@@ -5287,6 +5305,18 @@ export const openapiSpec = { components: { schemas: {
         "items": {
           "$ref": "#/components/schemas/EmailAccountCreateInput"
         }
+      }
+    }
+  },
+  "EmailAccountMoveInput": {
+    "type": "object",
+    "required": [
+      "target_workspace_id"
+    ],
+    "properties": {
+      "target_workspace_id": {
+        "type": "string",
+        "description": "Workspace id (from GET /workspaces) to move the inbox into"
       }
     }
   },
