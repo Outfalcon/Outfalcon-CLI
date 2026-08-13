@@ -1061,6 +1061,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Leads",
     "summary": "Create a lead list",
     "scope": "leads",
+    "description": "Optional group_id files the new list into a lead-list group; unknown or foreign group ids are stored as null (ungrouped).",
     "body": true,
     "reqSchema": "LeadListCreateInput"
   },
@@ -2810,6 +2811,10 @@ export const ROUTE_REGISTRY: RouteDef[] = [
       {
         "name": "disposition",
         "description": "Manual disposition (e.g. booked_meeting, declined_meeting)"
+      },
+      {
+        "name": "q",
+        "description": "Case-insensitive substring match on lead email, lead name, and both phone numbers"
       }
     ],
     "flag": "telephony"
@@ -5123,6 +5128,12 @@ export const openapiSpec = { components: { schemas: {
       },
       "tag": {
         "type": "string"
+      },
+      "group_id": {
+        "type": [
+          "string",
+          "null"
+        ]
       }
     }
   },
