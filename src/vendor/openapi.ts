@@ -2920,7 +2920,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Analytics",
     "summary": "Workspace summary stats",
     "scope": "campaigns",
-    "description": "All /analytics/* endpoints share the same optional filters: campaign_ids, tag_ids, esp (all comma-separated), start/end (YYYY-MM-DD). Omit everything for workspace-lifetime totals."
+    "description": "All /analytics/* endpoints share the same optional filters: campaign_ids, tag_ids, esp (all comma-separated), start/end (YYYY-MM-DD), and replies=human (excludes auto/OOO replies from every replied count/rate; default is inclusive). Omit everything for workspace-lifetime totals."
   },
   {
     "method": "get",
@@ -3027,6 +3027,14 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "summary": "Stats bucketed by recipient mail provider (lead-side MX classification)",
     "scope": "campaigns",
     "description": "Reply/bounce rates per recipient provider (gmail, outlook, yahoo, apple, zoho, other, unknown — leads.esp from MX records). Distinct from the `esp` filter, which is the SENDER-side transport. Accepts the shared campaign_ids/tag_ids/esp/start/end filters."
+  },
+  {
+    "method": "get",
+    "path": "/analytics/variants",
+    "tag": "Analytics",
+    "summary": "Stats bucketed by A/B variant (campaign → step → variant)",
+    "scope": "campaigns",
+    "description": "Sent/replied/interested/bounced counts and rates per copy variant, ordered campaign → step → variant. Attributed sends only: sends without a variant_id are excluded, so totals may be lower than /analytics/summary. Accepts the shared campaign_ids/tag_ids/esp/start/end filters."
   },
   {
     "method": "get",
@@ -3260,7 +3268,7 @@ export const ROUTE_REGISTRY: RouteDef[] = [
     "tag": "Bounces",
     "summary": "List recorded bounces with parsed reasons",
     "scope": "campaigns",
-    "description": "Every recorded bounce with its parsed reason: smtp_code, enhanced_code (RFC 3463, e.g. 5.1.1), bounce_type (hard/soft/block/unknown), a stable category slug (invalid_recipient, mailbox_disabled, mailbox_full, spam_block, auth_policy, dns_failure, message_too_large, temporary_failure, other), a simplified human-readable reason, the remote server's diagnostic snippet, and ai_summary (one-liner, present only when rules couldn't classify and a workspace AI key exists). Rows link back to campaign_id/lead_id/campaign_send_id and the DSN's inbox thread (account_id + conversation_id). Newest first.",
+    "description": "Every recorded bounce with its parsed reason: smtp_code, enhanced_code (RFC 3463, e.g. 5.1.1), bounce_type (hard/soft/block/unknown), a stable category slug (invalid_recipient, mailbox_disabled, mailbox_full, spam_block, auth_policy, recipient_policy, dns_failure, routing_failure, message_too_large, temporary_failure, other), a simplified human-readable reason, the remote server's diagnostic snippet, and ai_summary (one-liner, present only when rules couldn't classify and a workspace AI key exists). Rows link back to campaign_id/lead_id/campaign_send_id and the DSN's inbox thread (account_id + conversation_id). Newest first.",
     "query": [
       {
         "name": "campaign_id"
@@ -6030,7 +6038,9 @@ export const openapiSpec = { components: { schemas: {
           "mailbox_full",
           "spam_block",
           "auth_policy",
+          "recipient_policy",
           "dns_failure",
+          "routing_failure",
           "message_too_large",
           "temporary_failure",
           "other"
