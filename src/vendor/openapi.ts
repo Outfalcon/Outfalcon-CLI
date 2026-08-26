@@ -24,7 +24,7 @@ export const FLAG_LABELS: Record<NonNullable<RouteDef["flag"]>, string> = {
   "linkedin": "LinkedIn (Unipile configured)"
 };
 
-export const TAGS: Array<{ name: string; description: string }> = [
+export const TAGS: Array<{ name: string; description: string; alias?: string }> = [
   {
     "name": "Workspaces",
     "description": "Agency surface: create client workspaces, invite members, mint workspace-scoped API keys, and read rollup stats. A key sees exactly the workspaces its owner user is a member of."

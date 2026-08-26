@@ -14,7 +14,7 @@ const program = new Command();
 program
   .name("falcon")
   .description(
-    `Falcon — CLI for the GTM Sequencer API.\n` +
+    `Falcon — CLI for the SendingOS API.\n` +
       `${ROUTE_REGISTRY.length} operations, generated from the live route registry (always in sync).`
   )
   .version(VERSION, "-V, --version")

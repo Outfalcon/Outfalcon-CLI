@@ -142,7 +142,7 @@ function makeAction(route: RouteDef, params: string[], fields: FieldSpec[], quer
     // Query from documented filters (+ cursor/limit for cursor routes).
     const query: Record<string, unknown> = {};
     for (const q of queryDefs) {
-      const v = opts[camel(q.name)];
+      const v = opts[queryOptKey(q.name)];
       if (v === undefined) continue;
       if (q.enum && !q.enum.map(String).includes(String(v))) {
         fail(`--${kebab(q.name)} must be one of: ${q.enum.join(", ")}`);
@@ -246,6 +246,17 @@ function camel(s: string): string {
   return s.replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase());
 }
 
+/**
+ * The commander opts key for a generated query flag. Options are registered as
+ * `--${kebab(name)}` and commander stores them camelized, so the lookup key is
+ * camel(kebab(name)) — NOT camel(name), which leaves underscore names (campaign_ids)
+ * pointing at a key commander never sets. That mismatch silently dropped every
+ * underscore filter from the request URL.
+ */
+export function queryOptKey(name: string): string {
+  return camel(kebab(name));
+}
+
 /** Build one commander Command per resource (tag), each with its route actions. */
 export function buildResourceCommands(): Command[] {
   const byTag = new Map<string, RouteDef[]>();
@@ -259,6 +270,8 @@ export function buildResourceCommands(): Command[] {
     const routes = byTag.get(tag.name);
     if (!routes || !routes.length) continue;
     const resource = new Command(slugifyTag(tag.name)).description(tag.description);
+    // Back-compat / discoverability alias (e.g. `falcon flows` still works after Subsequences rename).
+    if (tag.alias) resource.alias(slugifyTag(tag.alias));
 
     const used = new Set<string>();
     for (const route of routes) {
@@ -285,6 +298,9 @@ export function buildResourceCommands(): Command[] {
       for (const p of params) cmd.argument(`<${p}>`, `path parameter: ${p}`);
 
       for (const q of queryDefs) {
+        // cursor routes register --cursor/--limit themselves below; a query def reusing those
+        // names would make commander throw on the duplicate option at startup.
+        if (route.cursor && (q.name === "cursor" || q.name === "limit")) continue;
         const o = new Option(`--${kebab(q.name)} <value>`, q.description || `filter: ${q.name}`);
         if (q.enum) o.choices(q.enum.map(String));
         cmd.addOption(o);

@@ -105,7 +105,7 @@ export interface RouteDef {
 
 export const FLAG_LABELS: Record<NonNullable<RouteDef["flag"]>, string> = ${j(FLAG_LABELS)};
 
-export const TAGS: Array<{ name: string; description: string }> = ${j(tags)};
+export const TAGS: Array<{ name: string; description: string; alias?: string }> = ${j(tags)};
 
 export const TAG_GROUPS: Array<{ name: string; tags: string[] }> = ${j(tagGroups)};
 

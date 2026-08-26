@@ -69,10 +69,24 @@ jobs:
           npm version patch -m "release: v%s"
           git push --follow-tags origin HEAD:main
 
+      # npm can fall behind the repo version when a publish fails (the 2026-07/08 stretch where
+      # a token without 2FA-bypass 403'd every publish while the version kept bumping). Publishing
+      # whenever npm's latest != package.json makes the next healthy run catch up, and keeps the
+      # scheduled run loudly red while npm is stale instead of "success" on no-change days.
+      - name: Check npm is current
+        id: npmver
+        if: github.event_name != 'push'
+        run: |
+          published=$(npm view @outfalcon/falcon version 2>/dev/null || echo "0.0.0")
+          local=$(node -p "require('./package.json').version")
+          echo "published=$published local=$local"
+          echo "behind=$([ "$published" != "$local" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
       - name: Publish to npm
         if: >-
           github.event_name == 'push' ||
           steps.sync.outputs.changed == 'true' ||
+          steps.npmver.outputs.behind == 'true' ||
           inputs.force_publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

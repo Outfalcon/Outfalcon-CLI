@@ -1,6 +1,6 @@
 # Falcon
 
-**Your entire cold-email stack, in the terminal.** `falcon` wraps the GTM Sequencer API so you can run
+**Your entire cold-email stack, in the terminal.** `falcon` wraps the SendingOS API so you can run
 campaigns, leads, inboxes, deliverability, automations, and analytics from the command line, a script,
 a CI pipeline, or an AI agent — **249 operations, one command each.**
 
