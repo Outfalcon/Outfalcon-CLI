@@ -5,8 +5,13 @@ name: Release
 #     if it changed, bump the patch version and publish. (Dispatch can force-publish current version.)
 #   • push a tag v*.*.* → publish the current version (manual/code-only releases).
 #
-# Only secret required: NPM_TOKEN (npm Automation token). No repo/backend access needed — the registry
-# is reconstructed from the public GET /api/v1/openapi.json.
+# Publishing uses npm TRUSTED PUBLISHING (OIDC) — no NPM_TOKEN secret. Long-lived publish
+# tokens died 2026-07-08 (bypass-2FA GAT deprecation; every token publish 403'd from that day).
+# One-time npm-side setup: npmjs.com → @outfalcon/falcon → Settings → Trusted Publisher →
+# GitHub Actions → owner "Outfalcon", repo "Outfalcon-CLI", workflow "release.yml".
+# Requires npm CLI >= 11.5.1 and `id-token: write` below; runs on GitHub-hosted runners only.
+# No repo/backend access needed — the registry is reconstructed from the public
+# GET /api/v1/openapi.json.
 
 on:
   schedule:
@@ -22,6 +27,7 @@ on:
 
 permissions:
   contents: write # push the version-bump commit + tag
+  id-token: write # mint the OIDC token npm trusted publishing exchanges for publish rights
 
 concurrency:
   group: release
@@ -38,6 +44,9 @@ jobs:
           node-version: 20
           cache: npm
           registry-url: https://registry.npmjs.org
+
+      # Node 20 bundles npm 10.x; trusted publishing needs the OIDC-aware npm CLI (>= 11.5.1).
+      - run: npm install -g npm@latest && npm --version
 
       - run: npm ci
 
@@ -82,12 +91,13 @@ jobs:
           echo "published=$published local=$local"
           echo "behind=$([ "$published" != "$local" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
+      # No token: npm >= 11.5.1 detects the trusted-publisher OIDC exchange automatically
+      # (and attaches provenance). Fails with an auth error until the one-time npm-side
+      # Trusted Publisher config exists for this repo+workflow.
       - name: Publish to npm
         if: >-
           github.event_name == 'push' ||
           steps.sync.outputs.changed == 'true' ||
           steps.npmver.outputs.behind == 'true' ||
           inputs.force_publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public
